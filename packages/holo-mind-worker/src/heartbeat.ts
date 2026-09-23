@@ -15,11 +15,13 @@ import { buildPrompt, parseJson, type Observed } from "./prompt.js";
 import { decide, type Intent, type Verdict } from "./policy.js";
 import { syncTxHashes } from "./evidence.js";
 import { readUsdcBalances } from "./rpc.js";
+import { readWorldDigest } from "./sensors.js";
 import {
   recordDarkroom,
   countDarkroom,
   spendTodayUsd,
   recentPrivate,
+  recentDarkroom,
   createMission,
   countMissionsSince,
   sumReservedTodayCents,
@@ -219,9 +221,25 @@ export async function beat(env: Env, modelOverride?: string): Promise<BeatResult
     privateLines = recent.map((m) => `[${m.role}] ${m.text}`);
   }
 
+  // Memory: feed Holo its own last few narrations so it varies instead of repeating
+  // the same imagery every beat. Best-effort — an empty log just means no memory block.
+  const recentRows = await recentDarkroom(env.DB, 3).catch(() => []);
+  const recentNarrations = recentRows
+    .map((r: { narration?: unknown }) => String(r?.narration ?? "").trim())
+    .filter(Boolean)
+    .reverse(); // oldest -> newest
+
+  // World: real recent changes in the project (public GitHub commits), fenced as
+  // untrusted data in the prompt. Optional and cached; null simply omits the section.
+  const worldDigest = await readWorldDigest();
+
   // One LLM call. A FRESH client per beat makes getSpending().totalUsd this beat's cost.
   const client = new LLMClient({ privateKey: cfg.walletKey as `0x${string}` });
-  const prompt = buildPrompt(o, privateLines, { maxMissionCents: cfg.nectarMaxPerMissionCents });
+  const prompt = buildPrompt(o, privateLines, {
+    maxMissionCents: cfg.nectarMaxPerMissionCents,
+    recentNarrations,
+    worldDigest,
+  });
   const resp = await client.chatCompletion(
     model,
     [{ role: "user" as const, content: prompt }],
