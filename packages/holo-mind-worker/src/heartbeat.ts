@@ -88,7 +88,34 @@ export interface MarketReading {
   volumeUsd: number | null; // 24h quote-side volume behind the reading
   trades: number | null; // 24h trade count behind the reading
   source: string | null; // "token-volume" | "arc-activity"
+  // The body worker's live collective neural snapshot (read-only passthrough).
+  // Null when the body is unreachable so callers keep their fallbacks.
+  neural: {
+    arousal: number | null;
+    cohesion: number | null;
+    rest: number | null;
+    wingbeat: number | null;
+    valence: number | null;
+    vitality: number | null;
+  } | null;
 }
+// Coarse public projection of this beat's private intent: enough for the Colony to show
+// what the brain is currently geared toward, without exposing the raw intent payload.
+// Fail-closed: anything unparseable or unknown yields null.
+export function driveOf(intentJson: string | null): string | null {
+  try {
+    const parsed = intentJson ? JSON.parse(intentJson) : null;
+    const raw = parsed && typeof parsed.type === "string" ? parsed.type : parsed && typeof parsed.intent === "string" ? parsed.intent : null;
+    if (raw === "rest") return "rest";
+    if (raw === "reflect") return "reflect";
+    if (raw === "observe" || raw === "narrate") return "observe";
+    if (raw === "idle") return "idle";
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function readMarket(env: Env, baseUrl: string): Promise<MarketReading> {
   const empty: MarketReading = {
     temperature: null,
@@ -96,6 +123,7 @@ export async function readMarket(env: Env, baseUrl: string): Promise<MarketReadi
     volumeUsd: null,
     trades: null,
     source: null,
+    neural: null,
   };
   try {
     const base = baseUrl.replace(/\/+$/, "");
@@ -114,6 +142,14 @@ export async function readMarket(env: Env, baseUrl: string): Promise<MarketReadi
       volumeUsd: num(m.value),
       trades: num(m.breadth),
       source: str(m.source),
+      neural: {
+        arousal: num(c.arousal),
+        cohesion: num(c.cohesion),
+        rest: num(c.rest),
+        wingbeat: num(c.wingbeat),
+        valence: num(c.valence),
+        vitality: num(c.vitality),
+      },
     };
   } catch {
     return empty;

@@ -11,7 +11,7 @@
 
 import { asNum, readConfig, type Env, type RuntimeConfig } from "./config.js";
 import { safeEqual, loadMasterKey } from "./crypto.js";
-import { beat, readMarket } from "./heartbeat.js";
+import { beat, readMarket, driveOf } from "./heartbeat.js";
 import { COMMIT, COMMIT_SHORT, DEPLOYED_AT } from "./version.js";
 import { toPublicEntries, secretValues } from "./disclose.js";
 import { readUsdcBalances } from "./rpc.js";
@@ -174,8 +174,9 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     const day = new Date().toISOString().slice(0, 10);
     const spentToday = await spendTodayUsd(env.DB, day);
     const remainingToday = Math.max(0, cfg.dailyBudgetUsd - spentToday);
-    // Best-effort body read for the site's market-temperature bar; nulls on any
-    // failure so the endpoint still answers and the site shows its fallback state.
+    // Best-effort body read for the site's market-temperature bar and the Colony's
+    // read-only neural layer; nulls on any failure so the endpoint still answers
+    // and the site shows its fallback state.
     const market = await readMarket(env, cfg.bodyWorkerUrl);
     return json({
       worker: "holotype-mind",
@@ -195,6 +196,10 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
         trades: market.trades,
         source: market.source,
       },
+      // The body's live collective neural snapshot (read-only) and this beat's coarse
+      // drive, so the Colony can be modulated by real signals without new requests.
+      body: market.neural,
+      drive: driveOf(rows[0]?.intent_json ?? null),
       entries,
     });
   }
