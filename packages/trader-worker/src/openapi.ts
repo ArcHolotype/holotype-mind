@@ -522,7 +522,7 @@ export const OPENAPI_SPEC = {
               type: "object",
               additionalProperties: true,
               properties: {
-                sample: { type: "object", additionalProperties: true, description: "blockNumber/txPerBlock/gasPerBlock/sampleBlocks/fetchedAt." },
+                sample: { type: "object", additionalProperties: true, description: "source/breadth/value/sampled/head/fetchedAt. arc-activity: breadth=tx/block, value=gas/block. token-volume: breadth=24h trades, value=24h volume USD." },
                 temperature: { type: "number" },
                 regime: { type: "string", enum: ["HOT", "CALM", "COLD"] },
                 baselineTx: { type: "number" },

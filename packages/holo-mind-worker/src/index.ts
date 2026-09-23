@@ -11,7 +11,7 @@
 
 import { asNum, readConfig, type Env, type RuntimeConfig } from "./config.js";
 import { safeEqual, loadMasterKey } from "./crypto.js";
-import { beat } from "./heartbeat.js";
+import { beat, readMarket } from "./heartbeat.js";
 import { toPublicEntries, secretValues } from "./disclose.js";
 import { readUsdcBalances } from "./rpc.js";
 import { walletIntegrityOk } from "./wallet.js";
@@ -159,6 +159,9 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     const day = new Date().toISOString().slice(0, 10);
     const spentToday = await spendTodayUsd(env.DB, day);
     const remainingToday = Math.max(0, cfg.dailyBudgetUsd - spentToday);
+    // Best-effort body read for the site's market-temperature bar; nulls on any
+    // failure so the endpoint still answers and the site shows its fallback state.
+    const market = await readMarket(env, cfg.bodyWorkerUrl);
     return json({
       worker: "holotype-mind",
       generated_at: new Date().toISOString(),
@@ -169,6 +172,13 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
         cap_usd: cfg.dailyBudgetUsd,
         spent_today_usd: spentToday,
         remaining_today_usd: remainingToday,
+      },
+      market: {
+        temperature: market.temperature,
+        regime: market.regime,
+        volume_usd: market.volumeUsd,
+        trades: market.trades,
+        source: market.source,
       },
       entries,
     });

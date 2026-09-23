@@ -45,7 +45,7 @@ import {
 import { planEvolution, germlineResolver, resolveNovelBreed, lineageAnchorPlan, type EvolutionLimits } from "./evolution.js";
 import {
   MarketMeter,
-  sampleArcActivity,
+  sampleMarket,
   derivePulse,
   type MarketState,
   type Regime,
@@ -1260,10 +1260,17 @@ export class FlyStateDO {
     //    on failure we hold the previous temperature so the population keeps a steady, calm state.
     let market: MarketState | null = null;
     try {
-      const sample = await sampleArcActivity(this.cfg);
-      market = meter.update(sample);
+      const sample = await sampleMarket(this.cfg);
+      // An empty read (no blocks contributed / token has no indexed pair or the API was
+      // unreachable) must NOT fold zeros into the meter — that would snap the organism to COLD on
+      // one bad fetch. Hold the previous temperature instead.
+      if (sample.sampled > 0) {
+        market = meter.update(sample);
+      } else {
+        console.warn("[DO] market sample empty (no data), holding last temperature");
+      }
     } catch (e) {
-      console.warn("[DO] arc sample failed, holding last temperature:", (e as Error).message);
+      console.warn("[DO] market sample failed, holding last temperature:", (e as Error).message);
     }
 
     const temperature = market?.temperature ?? prevTemp;
@@ -1683,10 +1690,11 @@ export class FlyStateDO {
         ? {
             temperature: market.temperature,
             regime: market.regime,
-            blockNumber: market.sample.blockNumber,
-            txPerBlock: market.sample.txPerBlock,
-            gasPerBlock: market.sample.gasPerBlock,
-            sampleBlocks: market.sample.sampleBlocks,
+            source: market.sample.source,
+            breadth: market.sample.breadth,
+            value: market.sample.value,
+            sampled: market.sample.sampled,
+            head: market.sample.head,
             baselineTx: market.baselineTx,
             baselineGas: market.baselineGas,
           }
@@ -1702,6 +1710,8 @@ export class FlyStateDO {
         ticksPerCron: this.cfg.ticksPerCron,
         simStepsPerTick: this.cfg.simStepsPerTick,
         marketSampleBlocks: this.cfg.marketSampleBlocks,
+        marketSource: this.cfg.marketSource,
+        tokenAddress: this.cfg.tokenAddress,
         regimeHot: this.cfg.regimeHot,
         regimeCold: this.cfg.regimeCold,
         marketGain: this.cfg.marketGain,
@@ -2152,20 +2162,21 @@ export class FlyStateDO {
         chainId: this.cfg.chainId,
         network: arcNetworkTag(this.cfg.isTestnet),
         isTestnet: this.cfg.isTestnet,
-        blockNumber: market?.sample.blockNumber ?? null,
+        blockNumber: market?.sample.head ?? null,
       },
       temperature,
       regime,
       facets: pulse,
       activity: market
         ? {
-            txPerBlock: market.sample.txPerBlock,
-            gasPerBlock: market.sample.gasPerBlock,
+            source: market.sample.source,
+            breadth: market.sample.breadth,
+            value: market.sample.value,
             baselineTx: market.baselineTx,
             baselineGas: market.baselineGas,
-            sampleBlocks: market.sample.sampleBlocks,
-            txRatio: market.baselineTx > 1e-6 ? market.sample.txPerBlock / market.baselineTx : 1,
-            gasRatio: market.baselineGas > 1e-6 ? market.sample.gasPerBlock / market.baselineGas : 1,
+            sampled: market.sample.sampled,
+            txRatio: market.baselineTx > 1e-6 ? market.sample.breadth / market.baselineTx : 1,
+            gasRatio: market.baselineGas > 1e-6 ? market.sample.value / market.baselineGas : 1,
           }
         : null,
       swarm: collective

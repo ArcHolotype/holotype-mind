@@ -15,6 +15,7 @@ const APPROVED_GLYPHS = new Set([
   "—", "–", "·", "•", "…", "§", "×", "−", "≈", "≠", "≤", "≥", "°",
   "→", "←", "↑", "↓", "↔", "⇒",
   "✓", "✗", "⚠", "✅", "™",
+  "★", // deliberate language-neutral marker used as non-ASCII test input in the disclosure-gate fixtures
   "“", "”", "‘", "’",
   "①", "②", "③", "④", "⑤",
 ]);

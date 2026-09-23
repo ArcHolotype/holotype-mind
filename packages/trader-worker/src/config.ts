@@ -33,6 +33,11 @@ export interface Env {
   REGIME_COLD?: string;             // temperature <= this ⇒ COLD (default 0.33)
   MARKET_GAIN?: string;             // logistic gain ratio→temperature (default 3.0; higher = twitchier)
 
+  // --- Market-temperature SOURCE (default: Arc whole-chain activity) ---
+  MARKET_SOURCE?: string;           // "arc-activity" (default) | "token-volume" (drive temperature from one token's 24h DEX volume)
+  TOKEN_ADDRESS?: string;           // 0x…40 token whose volume drives the temperature when MARKET_SOURCE="token-volume"
+  DEXSCREENER_URL?: string;         // override the DexScreener token endpoint base (default https://api.dexscreener.com/latest/dex/tokens)
+
   // --- Population ---
   POPULATION_SIZE?: string;         // number of flies (default 24, range 1..256)
   POPULATION_SEED_BASE?: string;    // base seed; fly i uses base + i*7919 (default 42)
@@ -205,6 +210,9 @@ export interface RuntimeConfig {
   regimeHot: number;
   regimeCold: number;
   marketGain: number;
+  marketSource: "arc-activity" | "token-volume";
+  tokenAddress: string | null;   // 0x…40 (lowercased) or null; required for the token-volume source
+  dexscreenerUrl: string | null; // optional endpoint override for the token-volume source
 
   // Population
   populationSize: number;
@@ -492,6 +500,12 @@ export function loadConfig(env: Env): RuntimeConfig {
     regimeHot: clamp(Number(env.REGIME_HOT || "0.66"), 0.05, 1),
     regimeCold: clamp(Number(env.REGIME_COLD || "0.33"), 0, 0.95),
     marketGain: clamp(Number(env.MARKET_GAIN || "3"), 0.2, 20),
+    marketSource: (env.MARKET_SOURCE || "").trim().toLowerCase() === "token-volume" ? "token-volume" : "arc-activity",
+    tokenAddress: (() => {
+      const a = (env.TOKEN_ADDRESS ?? "").trim().toLowerCase();
+      return /^0x[0-9a-f]{40}$/.test(a) ? a : null;
+    })(),
+    dexscreenerUrl: (env.DEXSCREENER_URL ?? "").trim() || null,
 
     populationSize,
     populationSeedBase,

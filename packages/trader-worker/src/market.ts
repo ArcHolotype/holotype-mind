@@ -19,17 +19,28 @@
 import type { RuntimeConfig } from "./config.js";
 import { clamp } from "./config.js";
 import { publicClient } from "./chain.js";
+import { fetchTokenVolume } from "./dex.js";
 import type { MarketPulse } from "@fly/fly-brain";
 
 export type Regime = "HOT" | "CALM" | "COLD";
 
-/** One observation of Arc activity, averaged over the sampled block window. */
+/** Where a market sample came from. `arc-activity` = whole-chain throughput; `token-volume` = one
+ *  token's DEX trading volume (see MARKET_SOURCE / TOKEN_ADDRESS in config). */
+export type MarketSource = "arc-activity" | "token-volume";
+
+/**
+ * One market observation, reduced to two same-scale signals that the meter compares against their
+ * own EWMA baselines. The names are source-neutral:
+ *   · arc-activity → breadth = mean tx/block,      value = mean gasUsed/block
+ *   · token-volume → breadth = 24h trade count,    value = 24h volume (USD)
+ */
 export interface MarketSample {
-  blockNumber: number;    // highest block number included in the sample
-  txPerBlock: number;     // mean transactions per block across the window
-  gasPerBlock: number;    // mean gasUsed per block across the window
-  sampleBlocks: number;   // how many blocks actually contributed (some fetches may fail)
-  fetchedAt: number;      // wall-clock ms when the sample completed
+  source: MarketSource;
+  breadth: number;      // signal 1 (how MANY things happened)
+  value: number;        // signal 2 (how HEAVY / how much value)
+  sampled: number;      // arc: blocks that contributed; token: pairs aggregated
+  head: number;         // arc: highest block number; token: 0 (n/a)
+  fetchedAt: number;    // wall-clock ms when the sample completed
 }
 
 /** A sample plus the temperature/regime the MarketMeter derived from it. */
@@ -37,8 +48,8 @@ export interface MarketState {
   sample: MarketSample;
   temperature: number;    // (0,1); 0.5 = in line with the learned baseline
   regime: Regime;
-  baselineTx: number;     // EWMA baseline of txPerBlock after this update
-  baselineGas: number;    // EWMA baseline of gasPerBlock after this update
+  baselineTx: number;     // EWMA baseline of sample.breadth after this update (legacy key name, persisted)
+  baselineGas: number;    // EWMA baseline of sample.value after this update (legacy key name, persisted)
 }
 
 /**
@@ -54,6 +65,7 @@ export class MarketMeter {
   private baselineGas = 0;
   private sampleCount = 0; // samples folded in so far (drives the cold-start adaptive alpha)
   private primed = false;
+  private source: MarketSource | null = null; // baselines are scale-specific to one source
 
   constructor(alpha = 0.08, hotT = 0.66, coldT = 0.33, gain = 3.0) {
     this.alpha = clamp(alpha, 0.001, 1);
@@ -64,28 +76,37 @@ export class MarketMeter {
 
   /** Fold a fresh activity sample in and return the derived temperature + regime. */
   update(s: MarketSample): MarketState {
+    // The EWMA baselines are calibrated to one source's scale (arc tx/gas vs token trades/volume).
+    // If the source changes — e.g. flipping MARKET_SOURCE on a live DO that persisted arc-activity
+    // baselines — re-seed from this sample instead of comparing across incommensurable scales,
+    // which would otherwise spike the temperature until the baseline re-converged.
+    if (this.source !== s.source) {
+      this.primed = false;
+      this.sampleCount = 0;
+      this.source = s.source;
+    }
     this.sampleCount++;
     if (!this.primed) {
       // Cold start: seed the baseline with the first observation. With no history to deviate
       // from, the market is CALM by definition (temperature settles at 0.5 below).
-      this.baselineTx = s.txPerBlock;
-      this.baselineGas = s.gasPerBlock;
+      this.baselineTx = s.breadth;
+      this.baselineGas = s.value;
       this.primed = true;
     }
 
     // Guard against a dead-quiet baseline (division by ~0): treat that signal as neutral.
-    const txRatio = this.baselineTx > 1e-6 ? s.txPerBlock / this.baselineTx : 1;
-    const gasRatio = this.baselineGas > 1e-6 ? s.gasPerBlock / this.baselineGas : 1;
-    // Weight transaction breadth a little above gas heaviness: how MANY things happened matters
-    // more to "market enthusiasm" than how expensive they were.
+    const txRatio = this.baselineTx > 1e-6 ? s.breadth / this.baselineTx : 1;
+    const gasRatio = this.baselineGas > 1e-6 ? s.value / this.baselineGas : 1;
+    // Weight breadth a little above heaviness: how MANY things happened matters more to "market
+    // enthusiasm" than how large each was. (arc: tx vs gas; token: trade count vs volume.)
     const ratio = 0.6 * txRatio + 0.4 * gasRatio;
     const temperature = ratioToTemperature(ratio, this.gain);
 
     // Adaptive alpha: fast at cold start (1/n) so the first-sample seed can't bias the whole run,
     // decaying to the slow steady alpha so the baseline then tracks the REGIME, not the spike.
     const aEff = Math.max(this.alpha, 1 / this.sampleCount);
-    this.baselineTx += aEff * (s.txPerBlock - this.baselineTx);
-    this.baselineGas += aEff * (s.gasPerBlock - this.baselineGas);
+    this.baselineTx += aEff * (s.breadth - this.baselineTx);
+    this.baselineGas += aEff * (s.value - this.baselineGas);
 
     const regime: Regime =
       temperature >= this.hotT ? "HOT" : temperature <= this.coldT ? "COLD" : "CALM";
@@ -113,6 +134,7 @@ export class MarketMeter {
       baselineGas: this.baselineGas,
       sampleCount: this.sampleCount,
       primed: this.primed,
+      source: this.source,
     };
   }
 
@@ -122,6 +144,7 @@ export class MarketMeter {
     m.baselineGas = Number(o?.baselineGas ?? 0);
     m.sampleCount = Number(o?.sampleCount ?? 0);
     m.primed = !!o?.primed;
+    m.source = (o?.source as MarketSource | null) ?? null;
     return m;
   }
 }
@@ -167,12 +190,45 @@ export async function sampleArcActivity(cfg: RuntimeConfig): Promise<MarketSampl
 
   const denom = Math.max(1, count);
   return {
-    blockNumber: Number(maxBn > 0n ? maxBn : head),
-    txPerBlock: txSum / denom,
-    gasPerBlock: gasSum / denom,
-    sampleBlocks: count,
+    source: "arc-activity",
+    breadth: txSum / denom,
+    value: gasSum / denom,
+    sampled: count,
+    head: Number(maxBn > 0n ? maxBn : head),
     fetchedAt: Date.now(),
   };
+}
+
+/**
+ * Read one token's 24h DEX trading activity (DexScreener) and reduce it to the same two signals:
+ * breadth = 24h trade count (buys + sells), value = 24h volume in USD, aggregated across every
+ * pair for the token on the configured chain. An empty/unreachable read returns `sampled: 0` so the
+ * caller can hold the previous temperature rather than snapping the organism to COLD on one bad
+ * fetch.
+ */
+export async function sampleTokenVolume(cfg: RuntimeConfig): Promise<MarketSample> {
+  const chainName = cfg.isTestnet ? "arc-testnet" : "arc";
+  const v = await fetchTokenVolume(cfg.tokenAddress ?? "", chainName, {
+    baseUrl: cfg.dexscreenerUrl ?? undefined,
+  });
+  return {
+    source: "token-volume",
+    breadth: v.trades,
+    value: v.volumeUsd,
+    sampled: v.pairs,
+    head: 0,
+    fetchedAt: Date.now(),
+  };
+}
+
+/**
+ * Choose the market data source. `token-volume` is used only when it is selected AND a token address
+ * is configured; otherwise fall back to Arc whole-chain activity. Kept as a switch so the organism's
+ * temperature driver can be flipped back without a code change.
+ */
+export async function sampleMarket(cfg: RuntimeConfig): Promise<MarketSample> {
+  const wantToken = cfg.marketSource === "token-volume" && !!cfg.tokenAddress;
+  return wantToken ? sampleTokenVolume(cfg) : sampleArcActivity(cfg);
 }
 
 /**
@@ -190,8 +246,8 @@ export async function sampleArcActivity(cfg: RuntimeConfig): Promise<MarketSampl
  */
 export function derivePulse(state: MarketState, prevTemperature: number): MarketPulse {
   const T = state.temperature;
-  const txRatio = state.baselineTx > 1e-6 ? state.sample.txPerBlock / state.baselineTx : 1;
-  const gasRatio = state.baselineGas > 1e-6 ? state.sample.gasPerBlock / state.baselineGas : 1;
+  const txRatio = state.baselineTx > 1e-6 ? state.sample.breadth / state.baselineTx : 1;
+  const gasRatio = state.baselineGas > 1e-6 ? state.sample.value / state.baselineGas : 1;
   return {
     temperature: clamp01(T),
     momentum: clamp((T - prevTemperature) * 10, -1, 1),

@@ -55,6 +55,14 @@ crons = ["*/5 * * * *"]
 CHAIN_ID = "5042"                             # 5042 = Arc MAINNET
 RPC_URL = "https://rpc.mainnet.arc.io"        # read-only public RPC for the sim stage
 
+# ===== Market-temperature SOURCE — HOLOTYPE token volume (2026-09-23). =====
+# The organism's temperature is now driven by the HOLOTYPE token's 24h DEX volume
+# on Arc (DexScreener), not whole-chain activity. Flip MARKET_SOURCE back to
+# "arc-activity" to restore the previous driver without a code change. Read-only;
+# no key, no spend. On an empty/unreachable read the body holds its last temperature.
+MARKET_SOURCE = "token-volume"
+TOKEN_ADDRESS = "0xECa7C682fbb32EC4F1B3bBb28791Fe184D3552A8"
+
 # ===== Fly population — HOLO = 1 (the genesis fly). =====
 # DECISION (2026-09-22): Holotype runs ONE fly — Holo (= Holotype), the genesis
 # fly with neurons + an LLM brain, a layer independent of any connectome swarm.

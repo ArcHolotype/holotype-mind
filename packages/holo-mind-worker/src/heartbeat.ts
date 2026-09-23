@@ -76,6 +76,48 @@ async function observe(env: Env, baseUrl: string): Promise<Observed> {
   };
 }
 
+// Public, best-effort read of the market temperature for the site's temperature
+// bar. Never throws and never blocks the endpoint: if the BODY worker is
+// unreachable every field comes back null, so the caller renders its "waiting
+// for a reading" fallback instead of a stale or invented number.
+export interface MarketReading {
+  temperature: number | null; // 0..1, relative to the token's own recent norm
+  regime: string | null; // "HOT" | "CALM" | "COLD"
+  volumeUsd: number | null; // 24h quote-side volume behind the reading
+  trades: number | null; // 24h trade count behind the reading
+  source: string | null; // "token-volume" | "arc-activity"
+}
+export async function readMarket(env: Env, baseUrl: string): Promise<MarketReading> {
+  const empty: MarketReading = {
+    temperature: null,
+    regime: null,
+    volumeUsd: null,
+    trades: null,
+    source: null,
+  };
+  try {
+    const base = baseUrl.replace(/\/+$/, "");
+    const url = `${base}/state`;
+    const r = env.BODY ? await env.BODY.fetch(new Request(url)) : await fetch(url);
+    if (!r.ok) return empty;
+    const s: any = await r.json();
+    const m = s.market ?? {};
+    const c = s.collective ?? {};
+    const num = (v: unknown): number | null =>
+      typeof v === "number" && Number.isFinite(v) ? v : null;
+    const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+    return {
+      temperature: num(m.temperature ?? c.temperature),
+      regime: str(m.regime ?? c.regime),
+      volumeUsd: num(m.value),
+      trades: num(m.breadth),
+      source: str(m.source),
+    };
+  } catch {
+    return empty;
+  }
+}
+
 // Per-neuron read-out of one fly off the BODY worker (GET /snapshot?flyId=N), used to map
 // a thought onto specific connectome nodes. Best-effort and FREE: it rides the same service
 // binding as observe(), and any failure returns null so it can NEVER break a heartbeat.
