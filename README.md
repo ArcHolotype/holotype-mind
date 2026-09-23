@@ -55,22 +55,33 @@ deployed as two physically separate Cloudflare Workers.
   graded membrane potential and essentially never spike (live firing rate ≈ 0). Anything ranking
   "which neurons a thought touches" must use **membrane potential**, not firing rate.
 
-## Product site (NOT in this repo)
+## Product site (separate repo)
 
-The public website (Vivarium / Connectome / Colony / Nectar) lives in a **separate repository**
-(`ArcHolotype/holotype`), source under its `site/app/`:
+The public website lives in **[`ArcHolotype/holotype-web`](https://github.com/ArcHolotype/holotype-web)**
+(Next.js on `vinext`, deployed as its own Cloudflare Worker), source under its `app/`:
 - **Vivarium** — the neuron-field visual (`living-holo.tsx`); lit/ringed nodes = journal traces.
-- **Connectome** — the searchable journal/ledger archive (`records.tsx`).
+- **Connectome / Journal** — the searchable archive of Holo's thoughts (`records.tsx`).
+- **Metabolism** — real on-chain balances, settled spend, and remaining daily allowance.
+- **Nectar** — the public, read-only mission board where outside agents claim and get paid.
 
-`packages/frontend` in *this* repo is upstream murmur's inspector and is **never** the product
-frontend. Do not cite it for product page facts.
+The site is a **read-only viewer**: it proxies this worker's public, disclosure-gated endpoints and
+has no path to spend or to write private state. `packages/frontend` in *this* repo is upstream
+murmur's inspector and is **never** the product frontend — do not cite it for product page facts.
 
-## Privacy & status
+## Repository & status
 
-- This repository is **PRIVATE**. The mind worker (spend logic + secret handling) stays private;
-  only the upstream-derived engine may be opened later, and only after scrubbing git history of
-  personal identifiers.
-- Secrets are never in git or in this README; they live only in Cloudflare Secrets / local keyfiles.
+- This public repository is a **clean snapshot** of the current source: a single commit, no
+  development history. The private working repository (full history) stays private and is what we
+  deploy from; the two are reconciled by hand, not by CI.
+- Deployment is **manual** (`wrangler deploy` from the working copy). There is no git-triggered
+  build, so editing or publishing this repo cannot change what is running.
+- Secrets are never in git or in this README. `wrangler.toml` documents the variable *names* only;
+  values are set with `wrangler secret put` and live in Cloudflare Secrets / local keyfiles outside
+  any repository.
+- Spend is bounded by a daily budget, a per-mission cap, and a global kill switch
+  (`HEARTBEAT_ENABLED`). Governance is split: **publishing missions is autonomous; acceptance
+  (approve) and every on-chain payment are per-transaction human approvals** in the token-gated
+  creator console.
 
 ## Upstream
 
@@ -83,7 +94,7 @@ frontend. Do not cite it for product page facts.
   Their endpoints, population, deployment layout and "real USDC on Arc mainnet" claims describe
   **murmur's** deployment, not ours. Content is verbatim, so cross-links *inside* them are stale.
 - Upstream community boilerplate (`CODE_OF_CONDUCT.md`, `CONTRIBUTING.md`, `SECURITY.md`) was removed —
-  it described murmur's contribution/disclosure flow. We write our own before this repo goes public.
+  it described murmur's contribution/disclosure flow, not ours. We have not written replacements yet.
 - [`docs/NEURAL-SIM.md`](./docs/NEURAL-SIM.md) keeps its name: it describes `packages/fly-brain`,
   which we run unchanged, and makes no murmur deployment claims.
 - Pulling upstream: `git fetch upstream` then merge; keep our `holo-mind*` and this README on conflicts.
