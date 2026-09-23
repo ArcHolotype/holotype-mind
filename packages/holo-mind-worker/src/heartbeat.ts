@@ -11,7 +11,7 @@
 import { LLMClient } from "@blockrun/llm";
 import { readConfig, type Env } from "./config.js";
 import { loadMasterKey } from "./crypto.js";
-import { buildPrompt, parseJson, type Observed } from "./prompt.js";
+import { buildPrompt, parseJson, extractNarration, type Observed } from "./prompt.js";
 import { decide, type Intent, type Verdict } from "./policy.js";
 import { syncTxHashes } from "./evidence.js";
 import { readUsdcBalances } from "./rpc.js";
@@ -243,12 +243,16 @@ export async function beat(env: Env, modelOverride?: string): Promise<BeatResult
   const resp = await client.chatCompletion(
     model,
     [{ role: "user" as const, content: prompt }],
-    { responseFormat: { type: "json_object" }, temperature: 0.8, maxTokens: 300 },
+    // 600 (was 300): the richer prompt (memory + world digest) draws longer, more
+    // elaborate narrations, and 300 was truncating the JSON mid-string so it failed to
+    // parse. 600 leaves room for the narration plus the intent object to close cleanly,
+    // and still bounds a beat far under PER_BEAT_CAP_USD.
+    { responseFormat: { type: "json_object" }, temperature: 0.8, maxTokens: 600 },
   );
   const raw = resp.choices?.[0]?.message?.content ?? "";
   const usage = resp.usage;
   const costUsd = Number(client.getSpending?.().totalUsd ?? 0);
-  // Per-beat cap is a post-hoc alarm: maxTokens=300 mathematically bounds any model's
+  // Per-beat cap is a post-hoc alarm: maxTokens=600 mathematically bounds any model's
   // beat cost far under PER_BEAT_CAP_USD, so this should never trip — but if a future
   // model/price made it trip, we record it loudly rather than hide it.
   const costOverCap = costUsd >= cfg.perBeatCapUsd;
@@ -257,13 +261,17 @@ export async function beat(env: Env, modelOverride?: string): Promise<BeatResult
   let intent: Intent;
   let narration: string;
   let parseErr: string | null = null;
+  // Last-resort cleanup so the public feed never shows a raw JSON fragment.
+  const cleanRaw = (s: string) => String(s).replace(/```json|```/g, "").trim().slice(0, 280);
   try {
     const p = parseJson(raw);
-    narration = String(p.narration ?? "").trim() || String(raw).slice(0, 280);
+    narration = String(p.narration ?? "").trim() || extractNarration(raw) || cleanRaw(raw);
     intent = (p.intent as Intent) ?? { type: "narrate", reason: "model returned no intent" };
   } catch (e) {
     parseErr = (e as Error).message;
-    narration = String(raw).slice(0, 280);
+    // Truncated/malformed JSON: salvage the narration text itself rather than storing
+    // the raw `{"narration":"...` fragment, which would otherwise surface publicly.
+    narration = extractNarration(raw) || cleanRaw(raw);
     intent = { type: "narrate", reason: `unparseable JSON (${parseErr})` };
   }
   const verdict: Verdict = decide(intent);

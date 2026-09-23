@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildPrompt, type Observed } from "./prompt";
+import { buildPrompt, extractNarration, parseJson, type Observed } from "./prompt";
 
 const o: Observed = {
   tickIndex: 10,
@@ -47,4 +47,35 @@ test("creator guidance still appears and is marked confidential", () => {
   const p = buildPrompt(o, ["be curious"]);
   assert.match(p, /PRIVATE GUIDANCE FROM YOUR CREATOR/);
   assert.match(p, /- be curious/);
+});
+
+test("extractNarration salvages clean prose from a complete reply", () => {
+  const raw = '{"narration":"A calm thought.","intent":{"type":"observe","reason":"r"}}';
+  assert.equal(extractNarration(raw), "A calm thought.");
+});
+
+test("extractNarration salvages prose from a truncated reply (token cap mid-string)", () => {
+  const raw = '{"narration":"Something has changed in how the last few moments sit inside me';
+  assert.equal(
+    extractNarration(raw),
+    "Something has changed in how the last few moments sit inside me",
+  );
+});
+
+test("extractNarration unescapes and never returns the raw JSON wrapper", () => {
+  const raw = '{"narration":"line one\\nline two \\"quoted\\"';
+  const out = extractNarration(raw) ?? "";
+  assert.equal(out.startsWith("{"), false);
+  assert.match(out, /line one/);
+  assert.match(out, /"quoted"/);
+});
+
+test("extractNarration returns null when there is no narration field", () => {
+  assert.equal(extractNarration('{"intent":{"type":"idle"}}'), null);
+  assert.equal(extractNarration("no json here"), null);
+});
+
+test("parseJson still parses a well-formed reply", () => {
+  const p = parseJson('{"narration":"hi","intent":{"type":"observe"}}');
+  assert.equal(p.narration, "hi");
 });

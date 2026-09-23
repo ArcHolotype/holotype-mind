@@ -82,6 +82,23 @@ export function buildPrompt(
   ].join("\n");
 }
 
+// Salvage the narration text from a model reply even when the JSON is truncated or
+// malformed (e.g. the output hit the token cap mid-string). Returns clean prose so the
+// public feed never shows a raw `{"narration":"...` fragment; null when nothing usable.
+export function extractNarration(raw: string): string | null {
+  const text = String(raw ?? "").replace(/```json|```/g, "");
+  const m = text.match(/"narration"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (!m) return null;
+  let value = m[1];
+  try {
+    value = JSON.parse(`"${value}"`); // unescape \n, \", etc.
+  } catch {
+    value = value.replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\$/, "");
+  }
+  value = value.trim();
+  return value || null;
+}
+
 // Tolerant JSON extractor: scan for the first depth-balanced {...} object, ignoring
 // stray code fences, leading prose, and extra trailing braces the model may emit.
 export function parseJson(text: string): any {
