@@ -12,6 +12,7 @@
 import { asNum, readConfig, type Env, type RuntimeConfig } from "./config.js";
 import { safeEqual, loadMasterKey } from "./crypto.js";
 import { beat, readMarket } from "./heartbeat.js";
+import { COMMIT, COMMIT_SHORT, DEPLOYED_AT } from "./version.js";
 import { toPublicEntries, secretValues } from "./disclose.js";
 import { readUsdcBalances } from "./rpc.js";
 import { walletIntegrityOk } from "./wallet.js";
@@ -138,6 +139,20 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
   // response carries nothing beyond the fact that the worker answers.
   if (path === "/healthz" && method === "GET") {
     return json({ ok: true, worker: "holotype-mind" });
+  }
+
+  // ---- public surface: build provenance ----
+  // Lets anyone verify the running worker matches a specific source commit:
+  // curl this, then check out `commit` in the public repository and compare.
+  // Carries no operational or personal data — only the build stamp.
+  if (path === "/version" && method === "GET") {
+    return json({
+      worker: "holotype-mind",
+      commit: COMMIT,
+      commit_short: COMMIT_SHORT,
+      deployed_at: DEPLOYED_AT,
+      repository: "https://github.com/ArcHolotype/holotype-mind",
+    });
   }
 
   // ---- public surface: the disclosed life-sign ----
