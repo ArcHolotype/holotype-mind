@@ -1,0 +1,104 @@
+# =============================================================================
+# Holotype MIND worker — OUR file (this whole package is ours; nothing upstream).
+#
+# This is the standalone "brain" worker, PHYSICALLY SEPARATE from the murmur-fork
+# BODY worker (holotype-dev). The split is deliberate (decision 2026-09-22):
+#   • the BODY worker stays PURE SIM — keyless, moneyless (its wrangler.holotype.toml
+#     keeps `wrangler secret list` EMPTY). We never put a wallet key in it.
+#   • the MIND worker is the ONLY place that holds the wallet private key, the
+#     AES master key and the creator token, and the only place that spends USDC.
+#   • crash isolation: if the mind crashes, the body keeps ticking — Holo's nervous
+#     system stays alive; we only lose "thinking" until the mind is fixed.
+#   • the murmur fork stays clean/diffable for upstream pulls.
+#
+# Deploy ONLY with:  npx wrangler deploy   (from this package dir)
+#
+# ------------------------- DISARMED POSTURE (this stage) ---------------------
+# This config is built to be SAFE BEFORE ANY KEY IS SET:
+#   - HEARTBEAT_ENABLED = "false"  → kill switch OFF: the cron handler does NOTHING,
+#     no LLM call, no spend. The mind only beats when this is explicitly "true".
+#   - NO secrets are set here. `wrangler secret list` MUST be empty until the
+#     deliberate arming step. With no HOLO_WALLET_KEY, beat() refuses to call the
+#     LLM at all (defence in depth) — it cannot spend what it cannot sign.
+#   - D1 database_id below is the REAL `holotype-mind-db` (created 2026-09-22,
+#     region APAC). Local `wrangler dev` uses a local SQLite file regardless.
+#
+# ------------------------- SPEND GOVERNANCE (user 2026-09-22) ---------------
+# Marked TEST allowances; revisit after we measure output quality + real spend:
+#   - float 10 USDC; DAILY_BUDGET_USD = 30 (Nectar not open yet)
+#   - PER_BEAT_CAP_USD = 1 → a single heartbeat API payment under $1 needs no human
+#     approval; at/over the cap the beat is refused. (Every top-tier model is ~$0.03
+#     or less per beat, so this never trips in practice — it is a hard ceiling.)
+#   - HEARTBEAT_ENABLED is the global kill switch: flip to "false" and ALL spend stops.
+#   - Nectar order payments / on-chain transfers remain PER-TX human approved (their
+#     policy rails are not built; the policy gate rejects them — see src/policy.ts).
+# =============================================================================
+
+name = "holotype-mind"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Heartbeat every 15 minutes (96 beats/day). The scheduled handler no-ops unless
+# HEARTBEAT_ENABLED = "true" AND the secrets are set AND budget remains.
+[triggers]
+crons = ["*/15 * * * *"]
+
+[vars]
+# The BODY worker's public read endpoint. The mind reads neural state over HTTP
+# (cross-worker, inside Cloudflare — sub-ms). Read-only; the mind never writes the body yet.
+BODY_WORKER_URL = "https://holotype-dev.archolotype.workers.dev"
+
+# Model is chosen PER CALL (BlockRun), so switching is a one-line change here.
+# Default = Claude Fable 5.1 (user pick 2026-09-22): most embodied/literary voice
+# for Holo's logs at the same low cost as Astra (~$0.006/beat). The cron uses this;
+# a creator can still override per-beat via POST /beat?model=<id>.
+MODEL = "anthropic/claude-fable-5.1"
+
+# ===== Kill switch + spend caps (TEST allowances — see header) =====
+HEARTBEAT_ENABLED = "true"         # GATE: global kill switch. OPENED 2026-09-23 at the user's explicit approval. "true" = mind beats/spends.
+DAILY_BUDGET_USD = "30"            # hard ceiling on total LLM spend per UTC day; beat refused past it.
+PER_BEAT_CAP_USD = "1"             # per-beat cost ALARM (post-hoc). maxTokens=300 bounds any model's beat
+                                   # cost to ~<$0.07, so this never trips in practice; if it ever did, the
+                                   # beat is recorded with costOverCap=true. NOT a pre-call refusal.
+PER_CALL_FEE_USD = "0.001"         # BlockRun x402 per-call chain fee, added to token cost.
+PRIVATE_CONTEXT_N = "8"            # how many recent private (creator) messages to inject per beat.
+NECTAR_MAX_PER_DAY = "3"           # hard cap on new Nectar missions per UTC day (autonomous or creator).
+NECTAR_MAX_PER_MISSION_USD = "5"   # hard cap on ONE mission's reward (test used 1; restored to 5 after first settled mission).
+MODULATORY_TOPK = "10"             # coupling stage ① (light up the front end, A2): each thought maps onto this many MODULATORY
+                                   # neurons (top-K by live MEMBRANE potential — that layer never spikes),
+                                   # stored in darkroom.neuron_indices.
+                                   # <=0 = map onto the whole ~40-neuron modulatory layer.
+ARC_NATIVE_DECIMALS = "18"         # Arc's native gas token is USDC but scaled at 18 decimals on-chain
+                                   # (verified 2026-09-23: raw 1e19 => 10 USDC at 18dec; the old default 6
+                                   # mis-rendered it as 1e13). No on-chain decimals() to ask, so pin it here.
+
+# ---------- Service binding: talk to the BODY worker IN-PLATFORM ----------
+# Worker→worker subrequests over the public *.workers.dev URL were returning 404
+# even though the same URL is 200 publicly (a Cloudflare routing quirk). A service
+# binding calls holotype-dev's fetch handler directly — no public HTTP hop, sub-ms,
+# reliable. observe() prefers env.BODY and falls back to BODY_WORKER_URL only if
+# the binding is absent (e.g. local dev). BODY_WORKER_URL is kept for that fallback.
+[[services]]
+binding = "BODY"
+service = "holotype-dev"
+
+# ---------- D1: the mind's OWN isolated store (darkroom narration + encrypted
+# private memory). NEVER the body's holotype-db, NEVER upstream murmur-db.
+# Created 2026-09-22 via `wrangler d1 create holotype-mind-db` (region APAC).
+# binding stays "DB" — the worker code reads env.DB.
+[[d1_databases]]
+binding = "DB"
+database_name = "holotype-mind-db"
+database_id = "e45a68d9-4942-4b0f-9d85-bb3c749d3e07"
+
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# ---------- SECRETS (set via `wrangler secret put`, NEVER written here): ----------
+# For this DISARMED stage we set NONE; `wrangler secret list` must be EMPTY.
+#   HOLO_WALLET_KEY  — Base wallet private key (0x…). Without it beat() cannot sign
+#                      a payment and refuses to call the LLM. Set only at arming.
+#   HOLO_MASTER_KEY  — 32-byte AES-GCM key (64 hex) that encrypts the private memory.
+#   CREATOR_TOKEN    — admin token gating the /creator + /darkroom routes.

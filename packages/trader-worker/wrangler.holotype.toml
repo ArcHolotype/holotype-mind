@@ -1,0 +1,173 @@
+# =============================================================================
+# Holotype SAFE deployment config — PURE SIMULATION, no chain writes, no money.
+#
+# This is OUR file and the ONLY deploy config. Upstream murmur's production config
+# sits beside it renamed to `wrangler.upstream-murmur.toml` (Arc MAINNET, real
+# EIP-3009 USDC broadcasts, 24-fly swarm); it is kept byte-identical purely as a
+# diff baseline and is never deployed. Deploy ONLY with:
+#   npx wrangler deploy --config wrangler.holotype.toml
+# Because there is no `wrangler.toml` in this directory any more, a bare
+# `wrangler deploy` / `wrangler dev` fails loudly instead of shipping upstream's
+# real-money config; every script in package.json pins `--config`.
+#
+# VAR BUDGET: the Workers Free plan caps a Worker at 64 vars. We keep only the
+# vars that matter — the safety gates (explicit) + core sim behaviour. Every
+# disabled feature's tuning params and every cleared contract address are OMITTED
+# on purpose: the features are OFF, the code defaults those to empty/inert, and
+# omitting them means NO mainnet address is present anywhere in this deploy.
+#
+# Safety gate (HANDOFF §L stage 2), every line verified:
+#   - worker name != murmur ................ holotype-dev
+#   - routes ............................... REMOVED (no custom domain inherited)
+#   - ECONOMY_FACILITATOR .................. simulated (keyless local ledger)
+#   - ECONOMY_SHADOW ....................... true (sign+eth_call only, never broadcast)
+#   - ECONOMY_REAL_SPEND ................... false (kill switch: halts ALL real settlement)
+#   - PREDICT/ARENA/EVOLUTION/COMMUNITY .... false
+#   - WAR_ENABLED .......................... false
+#   - SIGNAL_ENABLED ....................... false (code default is true -> a 402 paywall; forced off)
+#   - ECONOMY_CIRCLE_FACILITATOR ........... off
+#   - all mainnet contract addresses ....... ABSENT (omitted -> code default empty; none inherited)
+#   - chain ................................ Arc MAINNET 5042 (direct-mainnet strategy; read-only here)
+#   - D1 ................................... NEW holotype-db (id 906547d4-…)
+#   - cron ................................. */5 (down from upstream every-minute)
+#   - connectome sizing .................... PINNED explicit: 1,080 neurons/fly (see below)
+# =============================================================================
+
+name = "holotype-dev"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---------- NO routes: we do NOT inherit upstream's api.muros.live custom domain.
+# Served on *.workers.dev only for now; a custom domain is a later, deliberate step.
+
+# ---------- Cron: every 5 minutes (upstream runs every minute). ----------
+[triggers]
+crons = ["*/5 * * * *"]
+
+[vars]
+# ===== Chain: Arc MAINNET (direct-mainnet strategy — NO testnet). =====
+# ECONOMY_FACILITATOR=simulated means NO money moves and NOTHING is broadcast;
+# the chain is only READ here (market temperature). Real spend is a later,
+# per-tx human-approved step (float $10, per-tx <=$0.5, daily total $100, kill switch).
+# Reliability principle (§F): swap in the private ALCHEMY_ARC_RPC_URL Secret
+# before any real-spend stage; the public RPC below is read-only for the sim.
+CHAIN_ID = "5042"                             # 5042 = Arc MAINNET
+RPC_URL = "https://rpc.mainnet.arc.io"        # read-only public RPC for the sim stage
+
+# ===== Fly population — HOLO = 1 (the genesis fly). =====
+# DECISION (2026-09-22): Holotype runs ONE fly — Holo (= Holotype), the genesis
+# fly with neurons + an LLM brain, a layer independent of any connectome swarm.
+# Any future population must be Holo's own offspring, never an inherited test
+# swarm. murmur's default POPULATION_SIZE=24 was a validation swarm, NOT Holo, so
+# it is reduced to 1 here. Single-DO (SHARD_COUNT=1) keeps the FLY_SHARD binding
+# inert. NOTE: an already-deployed DO persists its flies in SQLite, so after this
+# var change you MUST redeploy AND POST /reset (ADMIN_TOKEN) to rebuild the
+# genesis population at size 1 — changing the var alone does not shrink a live DO.
+POPULATION_SIZE = "1"
+POPULATION_SEED_BASE = "42"
+TICKS_PER_CRON = "6"
+SIM_STEPS_PER_TICK = "500"
+SHARD_COUNT = "1"                             # "1" = single FlyStateDO; FLY_SHARD binding inert
+
+# ===== Connectome sizing — Holo's brain is ONE number: 1,080 neurons. =====
+# 180 sensory + 400 L1 + 400 L2 + 40 modulatory + 12×5 motor = 1,080. These six
+# vars only PIN what the code already defaults to (fly-brain
+# DEFAULT_CONNECTOME_OPTIONS), so the deployed genome is explicit in ONE place and
+# `npm run replay` / the on-chain manifest cannot silently drift to another tier.
+# Pinning them does NOT change the brain: spec hash before == after
+# (e6f19908…31ef1b, 1080 neurons / 9,376 synapses).
+# The upstream murmur 10,800-neuron tier lives in wrangler.upstream-murmur.toml and
+# is NOT ours, NOT deployed. To grow Holo later (the 4,320 plan: 720/1600/1600/160/48
+# at density 0.005) you edit exactly these six numbers, redeploy, then re-sign the
+# manifest — nothing else in the repo changes.
+BRAIN_N_SENSORY = "180"
+BRAIN_N_INTER_L1 = "400"
+BRAIN_N_INTER_L2 = "400"
+BRAIN_N_MODULATORY = "40"
+BRAIN_N_MOTOR_PER_CHANNEL = "12"
+BRAIN_DENSITY = "0.02"
+
+# ===== Visitor stimulus =====
+STIMULUS_COOLDOWN_SEC = "30"
+FRONTEND_ORIGIN = "*"                         # NOT an access control. Do not "tighten" it expecting an effect:
+                                              # src/index.ts reflects the request's Origin header back verbatim
+                                              # (`get("Origin") ?? env.FRONTEND_ORIGIN ?? "*"`), so this value is
+                                              # only reached when a request carries no Origin at all — curl, cron,
+                                              # service bindings — none of which enforce CORS. Verified against the
+                                              # live worker 2026-09-22: Origin https://evil.example is echoed back,
+                                              # and the parsed `frontendOrigin` in config.ts is read nowhere.
+                                              # This body is keyless, every endpoint is free and public, and no
+                                              # Allow-Credentials is sent, so there is no browser session to
+                                              # protect here. A real gate belongs on the mind worker's token-gated
+                                              # routes (stage ②), not on this var.
+
+# ===== Agent economy — SIMULATED, keyless, no wallet, no real funds =====
+ECONOMY_ENABLED = "true"                      # simulated ledger only (facilitator=simulated -> no money moves)
+ECONOMY_INITIAL_BALANCE = "6"
+ECONOMY_BASE_PRICE = "0.002"
+ECONOMY_SOLVENCY_FLOOR = "0.5"
+ECONOMY_MAX_DEALS = "10"
+ECONOMY_FACILITATOR = "simulated"             # GATE: keyless local-dev ledger. NEVER "onchain" here.
+
+# ===== REAL-MONEY rails — ALL DISARMED (inert under simulated; explicit for defence-in-depth) =====
+ECONOMY_SHADOW = "true"                       # GATE: sign + eth_call only, broadcast nothing
+ECONOMY_REAL_SPEND = "false"                  # GATE: kill switch — halts ALL real settlement instantly
+ECONOMY_CIRCLE_FACILITATOR = "off"            # GATE: "off". NEVER "external"/"all" here.
+
+# ===== Feature kill switches — ALL OFF (their tuning params + contract addresses
+# are intentionally omitted; code defaults them inert while the feature is off). =====
+PREDICT_ENABLED = "false"                     # GATE
+ARENA_ENABLED = "false"                       # GATE
+WAR_ENABLED = "false"                         # GATE (upstream ships this TRUE on mainnet)
+COMMUNITY_ENABLED = "false"                   # GATE
+EVOLUTION_ENABLED = "false"                   # GATE
+EVOLUTION_HATCH_LIVE = "false"                # freeze live population
+SIGNAL_ENABLED = "false"                      # GATE: code default is TRUE upstream -> explicitly off
+
+# ===== Narrative sim layers (economic-side read-outs; move no money, touch no chain).
+# Code default is TRUE; kept ON for a richer sim. Set "false" for a bare skeleton. =====
+CULTURE_ENABLED = "true"
+INSTITUTIONS_ENABLED = "true"
+EPOCHS_ENABLED = "true"
+LAW_ENABLED = "true"
+DYNASTY_ENABLED = "true"
+
+# ===== IPFS pinning — OFF (default), no secrets =====
+IPFS_PINNER = "off"
+
+# ---------- Durable Objects: population + market state ----------
+[[durable_objects.bindings]]
+name = "FLY_STATE"
+class_name = "FlyStateDO"
+
+# FLY_SHARD binding stays declared (code references it) but is INERT at SHARD_COUNT="1".
+[[durable_objects.bindings]]
+name = "FLY_SHARD"
+class_name = "FlyShardDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FlyStateDO"]
+
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["FlyShardDO"]
+
+# ---------- D1: NEW holotype-db (NEVER reuse upstream murmur-db id a48ee596-…). ----------
+# Created 2026-09-22 via `wrangler d1 create holotype-db` (region APAC).
+# binding stays "DB" — the worker code reads env.DB, not wrangler's suggested name.
+[[d1_databases]]
+binding = "DB"
+database_name = "holotype-db"
+database_id = "906547d4-a4b9-478b-893e-686d27027a7e"
+
+# ---------- Observability ----------
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+# ---------- SECRETS (set via `wrangler secret put`, NEVER written here): ----------
+# For the pure-sim skeleton we set NONE. `wrangler secret list` must be EMPTY.
+# (ECONOMY_MNEMONIC / ECONOMY_FACILITATOR_PK / ALCHEMY_ARC_RPC_URL / ADMIN_TOKEN /
+#  CIRCLE_API_KEY / PINATA_JWT are all deliberately absent — no keys, no chain writes, no money.)

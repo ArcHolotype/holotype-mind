@@ -1,0 +1,15 @@
+-- Coupling stage ① ("light up the front end"): each beat's narration is mapped onto specific neuron
+-- indices in the BODY's connectome, so the frontend can later light those nodes and
+-- show the thought on click. Stage ① stays PRIVATE (token-gated /darkroom/recent).
+--
+-- neuron_indices holds a JSON text array of connectome indices (e.g. "[312,318,340]").
+-- Mapping (user pick 2026-09-22, A2): the MODULATORY layer only — conceptually Holo's
+-- "higher-level thinking", matching the evolution/override narrative. Within that layer we
+-- take the top-K by live MEMBRANE potential (MODULATORY_TOPK; K<=0 means the whole layer).
+-- Membrane, not firing rate: modulatory neurons are slow high-threshold integrators that
+-- encode "mood" as graded subthreshold potential and essentially never spike, so ranking
+-- them by firing rate would degenerate to a fixed node set. Ranking by membrane means
+-- different thoughts light different modulatory nodes and newer thoughts gradually cover
+-- older ones. NULL = the body snapshot was unavailable that beat (mapping is best-effort
+-- and must never break a heartbeat).
+ALTER TABLE holo_darkroom ADD COLUMN neuron_indices TEXT;

@@ -1,0 +1,60 @@
+{
+  "name": "murmur",
+  "version": "0.2.0",
+  "private": true,
+  "description": "murmur — a population of fruit-fly nervous systems adrift on the Arc market, each an autonomous agent whose ~1,080-neuron LIF connectome decides what to buy and from whom, settling in real USDC on Arc mainnet over x402. Every payment is a verifiable on-chain transaction; no LLM decides anything.",
+  "license": "MIT",
+  "keywords": [
+    "arc",
+    "x402",
+    "usdc",
+    "eip-3009",
+    "agent-economy",
+    "connectome",
+    "spiking-neural-network",
+    "cloudflare-workers",
+    "durable-objects",
+    "d1"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EvolutionDeep/murmur.git"
+  },
+  "homepage": "https://www.muros.live",
+  "bugs": {
+    "url": "https://github.com/EvolutionDeep/murmur/issues"
+  },
+  "workspaces": [
+    "packages/fly-brain",
+    "packages/trader-worker",
+    "packages/frontend",
+    "packages/arc-circle-x402",
+    "packages/holo-mind",
+    "packages/holo-mind-worker"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "tsc --noEmit -p packages/fly-brain/tsconfig.json && tsc --noEmit -p packages/trader-worker/tsconfig.json && tsc --noEmit -p packages/arc-circle-x402/tsconfig.json && tsc --noEmit -p packages/holo-mind-worker/tsconfig.json",
+    "test": "npm run test --workspaces --if-present",
+    "smoke": "npx --yes tsx packages/fly-brain/smoke.ts",
+    "replay": "npm run replay -w @fly/trader-worker -- --from-wrangler",
+    "dev:worker": "npm run dev -w @fly/trader-worker",
+    "deploy:worker": "npm run deploy -w @fly/trader-worker",
+    "dev:mind": "npm run dev -w holotype-mind-worker",
+    "deploy:frontend": "npm run deploy -w @fly/frontend",
+    "deploy": "npm run deploy:worker"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.133.0"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "workerd@1.20260916.1": true,
+    "fsevents@2.3.3": true
+  }
+}

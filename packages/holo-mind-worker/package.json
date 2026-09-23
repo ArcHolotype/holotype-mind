@@ -1,0 +1,28 @@
+{
+  "name": "holotype-mind-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Holotype MIND worker: Holo's LLM cognition as a standalone Cloudflare Worker, physically separate from the murmur-fork BODY worker. Cron heartbeat observes the body's neural state, asks an LLM (paid per-call in USDC via BlockRun x402) for a narration + intent, a deterministic policy gate decides, and the result is written to an isolated encrypted D1 store. Holds the wallet/master-key/creator-token secrets so the body worker stays keyless and moneyless.",
+  "license": "MIT",
+  "type": "module",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail",
+    "typecheck": "tsc --noEmit",
+    "cf-typegen": "wrangler types",
+    "d1:apply:local": "wrangler d1 migrations apply holotype-mind-db --local",
+    "d1:apply:remote": "wrangler d1 migrations apply holotype-mind-db --remote",
+    "test": "npx --yes tsx --test src/*.test.ts"
+  },
+  "dependencies": {
+    "@blockrun/llm": "^3.16.0",
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241112.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^4.133.0"
+  }
+}

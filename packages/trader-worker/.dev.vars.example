@@ -1,0 +1,19 @@
+# Copy this file to .dev.vars for local `wrangler dev`; .dev.vars is gitignored — NEVER commit it.
+#
+# LOCAL DEVELOPMENT is keyless: with no secrets the Worker runs the keyless simulated x402 economy and
+# only READS public Arc chain data. You need NOTHING below to develop or study the piece locally.
+#
+# The PRODUCTION deployment is LIVE and settles REAL USDC on Arc mainnet (EIP-3009 transfers). It needs
+# ECONOMY_FACILITATOR="onchain" + ECONOMY_SHADOW="false" in wrangler.toml AND the secrets below, set with
+# `wrangler secret put <NAME>` (encrypted at rest) — never written into this file.
+
+# One BIP-39 seed phrase → HD-derives every agent wallet (m/44'/60'/0'/0/{id}) + the gas wallet.
+# ECONOMY_MNEMONIC="your twelve or twenty four word seed phrase here"
+
+# Optional: a dedicated gas-wallet private key (0x-prefixed). If omitted, the gas wallet is derived
+# from ECONOMY_MNEMONIC at accountIndex 2,000,000.
+# ECONOMY_FACILITATOR_PK="0xYOUR_FACILITATOR_PRIVATE_KEY"
+
+# Optional: lock the mutating debug endpoints (POST /tick, /reset). When set, callers must present it as an
+# x-admin-token header or a ?token= query. Left unset, those endpoints stay open (fine for local dev).
+# ADMIN_TOKEN="a-long-random-operator-token"

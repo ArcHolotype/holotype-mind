@@ -1,0 +1,14 @@
+{
+  "name": "holo-mind",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Holo's mind: a local heartbeat loop that reads the creature's neural state, asks an LLM (BlockRun x402, paid per-request in USDC on Base) for a first-person narration + a structured intent, runs that intent past a deterministic policy gate, and records the narration to an isolated private darkroom store. The LLM only proposes; hardcoded policy decides. No money moves and nothing publishes until an approval rail exists.",
+  "scripts": {
+    "beat": "node src/heartbeat.mjs",
+    "loop": "node src/loop.mjs"
+  },
+  "dependencies": {
+    "@blockrun/llm": "^3.16.0"
+  }
+}

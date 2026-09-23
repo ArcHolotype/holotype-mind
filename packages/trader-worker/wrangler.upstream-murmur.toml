@@ -1,0 +1,346 @@
+name = "murmur"
+main = "src/index.ts"
+compatibility_date = "2026-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# ---------- Custom domain: the Worker API on the project's own zone ----------
+# api.muros.live → this Worker. A custom domain (not *.workers.dev) means the deployed frontend at
+# muros.live can reach the API even on networks that DNS-sinkhole workers.dev. Cloudflare provisions
+# the DNS record + SSL automatically on deploy (the muros.live zone is in this account).
+routes = [
+  { pattern = "api.muros.live", custom_domain = true }
+]
+
+# Cron: observe Arc, update the market temperature and let the fly population react — every minute
+# (Cloudflare's minimum cron granularity). Each run reads whole-chain activity and advances the sim.
+[triggers]
+crons = ["* * * * *"]
+
+# ---------- Variables (non-sensitive, committed with the code) ----------
+# PRODUCTION PHASE — 10x LIVE + GROWTH ARMED (Phase C). The swarm runs 10,800-neuron brains sharded across
+# 24 FlyShardDO isolates (SHARD_COUNT = "24" + the connectome sizing below), and ECONOMY_SHADOW = "false" so every netted transfer is
+# a REAL EIP-3009 USDC broadcast on Arc mainnet, bounded by the daily/per-agent caps + kill switch below. The
+# 10x behaviour decoder is recalibrated (band collapse fixed: inject() normalises against a fixed reference
+# channel size and proboscis uses a fixed fan-in, so all 5 motor channels stay live and unsaturated at 10x).
+# ECONOMY_FACILITATOR stays "onchain" and the mnemonic/keys stay fully wired; set ECONOMY_SHADOW = "true" to
+# fall back to sign + eth_call simulation with no broadcast. Secrets (NEVER committed): ECONOMY_MNEMONIC,
+# optionally ECONOMY_FACILITATOR_PK, ALCHEMY_ARC_RPC_URL. A fresh checkout with NO mnemonic falls back to sim.
+[vars]
+# ===== Arc chain =====
+# Deployed to Arc MAINNET (Chain ID 5042). The public mainnet RPC is reachable and serves live
+# blocks — verified from the dev machine: eth_chainId=0x13b2 (5042), eth_blockNumber ~21.25M,
+# eth_getBlockByNumber(latest) returns real txs/gas. Reads derive the market temperature; the relay
+# wallet also WRITES the agents' real EIP-3009 USDC transfers (see ECONOMY_FACILITATOR below).
+CHAIN_ID = "5042"                             # 5042 = Arc mainnet · 5042002 = Arc testnet
+RPC_URL = "https://rpc.mainnet.arc.io"        # Arc mainnet public RPC
+
+# ===== Market temperature (Arc whole-chain activity) =====
+MARKET_SAMPLE_BLOCKS = "16"                   # recent blocks sampled per cron for tx/gas throughput
+MARKET_EWMA_ALPHA = "0.08"                    # baseline smoothing (slow ⇒ tracks the regime, not spikes)
+MARKET_GAIN = "3.0"                           # logistic sharpness ratio→temperature (calibrated on live Arc)
+REGIME_HOT = "0.66"                           # temperature ≥ this ⇒ HOT
+REGIME_COLD = "0.33"                          # temperature ≤ this ⇒ COLD
+
+# ===== Fly population =====
+POPULATION_SIZE = "24"                        # number of flies in the swarm (1–256)
+POPULATION_SEED_BASE = "42"                   # base seed; fly i uses seed = base + i*7919
+TICKS_PER_CRON = "6"                          # simulation sub-ticks per cron
+SIM_STEPS_PER_TICK = "500"                    # total LIF integration steps per cron, split across sub-ticks
+# Swarm sharding (see swarm.ts / shard.ts). "1" = the original single-DO swarm — every brain in FlyStateDO,
+# the FLY_SHARD binding inert (ZERO shards). "24" fans the HEAVY per-fly LIF advance out to 24 FlyShardDO
+# isolates, each with its own 128 MB + CPU budget and its own SQLite, so each brain can grow past the
+# single-isolate memory ceiling. Only the compact motor/sensory read-out crosses the boundary, so the
+# coordinator stays small at any size. MUST stay paired with EVOLUTION_MAX_LIVE_POPULATION: shardCount =
+# ceil(cap/2) keeps ≤2 flies/shard (2 of the 10,800-neuron brains serialise to ~1.4 MB, under the 2 MB
+# single-value cap) — cap=48 ⇒ 24 shards (the startup guard forces hatchLive=false if flies/shard > 2).
+# Because slices derive from the STABLE cap, shardSlice(48,24,k) = shardSlice(24,12,k) = [2k,2k+2) for
+# k=0..11 — the 24 genesis brains NEVER migrate when growth is armed; shards 12..23 are new + empty until an
+# offspring hatches. Cloudflare QUEUES subrequests past the 6th (never rejects), so 24 fan out safely.
+# Rollback = SHARD_COUNT back to "12" + EVOLUTION_MAX_LIVE_POPULATION back to "24" (or "1" for single-DO).
+SHARD_COUNT = "24"
+
+# ===== Visitor stimulus ("poke the swarm") =====
+STIMULUS_COOLDOWN_SEC = "30"                  # one injection per visitor per N seconds
+FRONTEND_ORIGIN = "*"                         # CORS origin for the frontend
+
+# ===== Agent economy (x402 micropayments between fly agents) =====
+# Every fly is an autonomous agent with its own USDC micro-wallet; its neural drives decide what to buy and
+# from whom, and agents settle over x402. LIVE IN PRODUCTION: ECONOMY_FACILITATOR = "onchain" settles real
+# EIP-3009 USDC transfers (src/x402.ts) signed by each buyer's HD-derived key and relayed on-chain. Set
+# ECONOMY_FACILITATOR = "simulated" (or run without the ECONOMY_MNEMONIC secret) for the keyless local-dev
+# ledger, where no wallet, no key and no real funds are involved.
+ECONOMY_ENABLED = "true"                      # agent economy on/off (off ⇒ pure reactive population)
+ECONOMY_INITIAL_BALANCE = "6"                # starting USDC per agent wallet
+ECONOMY_BASE_PRICE = "0.002"                  # base price of one good (USDC) before neural/market scaling
+ECONOMY_SOLVENCY_FLOOR = "0.5"                # simulated treasury tops an agent up to this when it runs dry
+ECONOMY_MAX_DEALS = "10"                   # per-CRON settlement budget, spread across the 6 sub-ticks — 5× the old 2/cron rate
+ECONOMY_FACILITATOR = "onchain"             # "simulated" (keyless ledger) | "onchain" (real EIP-3009; needs the block below)
+
+# ===== Culture ⑤ + institutions ⑥ layers (all pure read-outs / economic-side; the connectome never notices) =====
+# CULTURE: feeding-cohort FAP-creed contagion (TTLed fashions + house traditions as breakwaters) overriding
+# only the decoded read-out line (fap/role) before snapshot + economy see it. INSTITUTIONS: deterministic
+# per-tick aggregate limit books (deals CROSS the book, mark tapes persist), sticky professions read off
+# fap history, and IOU credit with runs — credit is SIMULATED-LEDGER ONLY (onchain, the facilitator is the
+# sole balance authority, so a stiffed real payment stays a stiff). Both default TRUE; either "false"
+# restores the layer below it byte-for-byte (culture off ⇒ today's readings; institutions off ⇒ the
+# fixed-formula, jobless, debtless economy).
+CULTURE_ENABLED = "true"                      # ⑤ meme contagion + traditions on/off
+INSTITUTIONS_ENABLED = "true"                 # ⑥ books + professions + credit (one integrated switch)
+CREDIT_CAP_BASE_USDC = "0.05"                 # base IOU line per fly; traders ×2, reputation up to ×3 more (0 ⇒ credit off, books stay)
+IOU_RATE_PER_10TICK = "0.002"                 # interest per 10 sub-ticks on live IOUs (0.2%); accrual capped at 50% of principal
+# EPOCHS ⑦: the historian's shock detector force-opens a new era on a FAMINE/PLAGERA/BOOM/GREAT_HUDDLE/
+# DYNASTIC, or on a governance-injected miracle/cataclysm (food/threat ≥ 0.75) — always a pure read-out, it
+# names an age and never feeds back. "false" leaves only today's slow regime-driven era logic.
+EPOCHS_ENABLED = "true"                       # ⑦ shock epochs + governance-injected cataclysms on/off
+
+# ===== Real-money (ONCHAIN) settlement — LIVE: ECONOMY_SHADOW = "false" broadcasts every netted transfer as a
+#       real EIP-3009 USDC tx on Arc mainnet (bounded by the caps + kill switch below). The onchain path + HD
+#       keys are fully wired; set ECONOMY_SHADOW = "true" to sign + eth_call-simulate without broadcasting. To
+#       halt everything instantly set ECONOMY_REAL_SPEND = "false". These lines do nothing while
+#       ECONOMY_FACILITATOR = "simulated" (the keyless local-dev mode). =====
+# SECRETS — set with `wrangler secret put <NAME>`, NEVER written into this file:
+#   ECONOMY_MNEMONIC        one BIP-39 seed → HD-derives all agent wallets (m/44'/60'/0'/0/{id}) + gas wallet
+#   ECONOMY_FACILITATOR_PK  optional dedicated gas-wallet key (else the gas wallet is derived from the seed)
+#   ALCHEMY_ARC_RPC_URL     complete private Alchemy Arc mainnet HTTPS endpoint
+#   ADMIN_TOKEN             optional: when set, POST /tick + /reset require it (locks the debug endpoints)
+# Non-sensitive rails (safe to commit; uncomment to override the coded defaults in src/config.ts):
+# ECONOMY_REAL_SPEND = "true"                 # kill switch: set "false" to halt ALL real settlement instantly
+ECONOMY_SHADOW = "false"                    # LIVE: real EIP-3009 USDC transfers are broadcast on Arc mainnet (bounded by the caps + kill switch above); set "true" to sign + eth_call each transfer but broadcast nothing
+ECONOMY_DAILY_CAP = "100"                   # global real-spend ceiling per UTC day (USDC); raised 5× with the trade rate so 10/min isn't throttled; 0 = no cap
+ECONOMY_PER_AGENT_DAILY_CAP = "10"          # per-agent real-spend ceiling per UTC day (USDC); raised 5× with the trade rate; 0 = no cap
+# ECONOMY_MAX_DEAL = "0.05"                   # facilitator hard per-deal ceiling (USDC)
+# ECONOMY_GAS_PRICE_GWEI = "20"               # pin relay gas (Arc launched ~20 gwei); omit = let viem estimate
+# ECONOMY_USDC_EIP712_NAME = "USDC"           # EIP-712 domain name (probe: name()="USDC"); tune if signatures revert
+# ECONOMY_USDC_EIP712_VERSION = "2"           # EIP-712 domain version (probe: version()="2")
+
+# ===== Settlement NETTING (ONCHAIN ONLY — gas amortisation) =====
+# Trades no longer broadcast one tx per micropay: each pair's signed net accumulates in the DO and is
+# flushed at most once per cron, only when |net| ≥ MIN_BROADCAST or the net has aged ≥ FLUSH_TICKS
+# sub-ticks. Reciprocal trades cancel (net=0 ⇒ zero tx), dust carries forward, and nets above
+# ECONOMY_MAX_DEAL split into chunks. The internal ledger/volume/caps move ONLY on a mined receipt,
+# so a failed flush never invents money. Inert in simulated mode.
+ECONOMY_NET_MIN_BROADCAST = "0.004"          # min |net| (USDC) before a pair is broadcast; below ⇒ dust carries forward (~2× base price, so gas stays a minority of face value)
+ECONOMY_NET_FLUSH_TICKS = "30"               # force-flush any nonzero pending net at least every N sub-ticks (30 = 5 crons ≈ 5 min); 0 = never force
+
+# ===== Neural-receipt REGISTRY (ONCHAIN ONLY — trustless chain head) =====
+# Deploy contracts/NeuralReceiptRegistry.sol (see contracts/README.md), then set this to its address.
+# When set, each mined net is committed on-chain right after its EIP-3009 transfer, so the receipt
+# HASH-CHAIN HEAD lives on Arc and any verifier can rebuild the ordered chain from RPC events alone —
+# no murmur server in the loop. Absent ⇒ the commit step is skipped entirely (zero behaviour change).
+ECONOMY_REGISTRY_ADDRESS = "0x94d0c38bcc9957eaf8f318e6bbc6557f8cc3c815"   # deployed on Arc mainnet (5042); committer = the Worker's facilitator wallet
+
+# ===== Brain-MANIFEST REGISTRY (ONCHAIN ONLY — trustless "prove the brain") =====
+# Deployed contracts/NeuralManifestRegistry.sol via `npm run deploy:manifest` (mainnet needs CHAIN_ID=5042 +
+# MANIFEST_CONFIRM=1; it re-runs the offline replay and only commits the hash on PASS). When set, GET /manifest
+# reports this address so anyone can eth_call the committed manifestHash off Arc and rebuild every connectome
+# from its committed seeds offline — proving the swarm is real deterministic neurons, no LLM. Absent ⇒ the
+# manifest is still served + replayable, just not anchored on-chain yet (zero behaviour change).
+MANIFEST_REGISTRY_ADDRESS = "0x3412eb909252adb983aaf793f97a3754ca029a37"   # Arc mainnet (5042); committer = deployer 0x307D…3a0d; committed manifestHash 0x403551bb… (schema v1, pop 24)
+
+# ===== Connectome LINEAGE registry (ONCHAIN ONLY — the breeding market's tamper-evident ancestry) =====
+# Deployed contracts/ConnectomeLineage.sol via `npm run deploy:lineage` (mainnet needs CHAIN_ID=5042 +
+# LINEAGE_CONFIRM=1). When set, each bred connectome genome is committed on-chain (best-effort) via the Worker's
+# facilitator, so "who bred whom, from whom" is a public, tamper-evident fact anyone can read off Arc and replay
+# offline. The contract holds NO funds and has NO upgrade path. Absent ⇒ the lineage store + /lineage endpoints
+# still work, just not anchored on-chain yet (zero behaviour change).
+LINEAGE_ADDRESS = "0x482b7a3bbef796c9627d86d5a23c67728a78096f"   # Arc mainnet (5042, deploy tx 0x5916d510…3e70); committer = Worker facilitator 0x2b9a…055c, deployer/gas 0x307D…3a0d; forge 61/61
+
+
+# ===== Circle Facilitator Service (the OFFICIAL hosted x402 facilitator — src/circle.ts) =====
+# Circle now hosts the exact role murmur self-built: its relayer screens both parties, submits the buyer's
+# EIP-3009 USDC transfer and PAYS the settlement gas — "no relayer keys, no separate gas wallet". This block
+# delegates ONLY the per-deal USDC broadcast to Circle; the NeuralReceiptRegistry commits + PredictionArena
+# open/resolve are not USDC transfers, so they always still use murmur's own facilitator wallet (0x2b9a…055c).
+# CURRENT: "external" (mode line below) — LIVE on Arc MAINNET, verified with a zero-value keyless probe:
+# Circle accepted our EIP-712 seller proof + x402v2 body and reached the balance check (HTTP 200,
+# insufficient_funds for the 0-balance test buyer), so the hosted keyless path is correct. "off" ⇒ self-broadcast.
+# The buyer still signs the SAME EIP-3009 authorization; only the network string is translated to CAIP-2
+# (eip155:5042 mainnet / eip155:5042002 testnet) for Circle's routing, which never invalidates a signature.
+# ROLLOUT (done): straight to Arc MAINNET "external" (Arc Pulse seller side only), keyless — probe-verified
+# above. The internal agent economy still self-broadcasts; only flip to "all" after external proves out under
+# real traffic (that puts the core hot path on an external API). The keyless trial is rate-limited per payTo
+# and returns 403 registration_required once exhausted — for sustained high-volume mainnet use, add a Circle
+# API key (secret below) so auth switches to Bearer. Rollback = set the mode back to "off" and redeploy.
+ECONOMY_CIRCLE_FACILITATOR = "external"     # LIVE: Arc Pulse seller side settles via Circle's relayer (keyless trial; payTo 0x2b9a…055c signs the seller proof, Circle pays gas). Internal agent economy still self-broadcasts. "off"=self-broadcast all · "all"=+internal economy. Inert unless ECONOMY_FACILITATOR="onchain".
+CIRCLE_FACILITATOR_URL = "https://api.circle.com"   # Circle API base URL; sandbox = https://api-sandbox.circle.com. One host routes testnet+mainnet by the CAIP-2 network in the body.
+CIRCLE_MAX_TIMEOUT_SECONDS = "12"           # seconds Circle may wait for terminal settlement before returning "pending" (Arc settles with instant finality)
+# SECRET (optional) — set with `wrangler secret put CIRCLE_API_KEY`, NEVER written here: a Circle API key for
+# Bearer auth in production. Absent ⇒ keyless trial, authenticating each settle with an EIP-712 seller proof
+# signed by the payTo key murmur already holds. Mixing Bearer + seller-proof on one request is a 400.
+
+
+# ===== Prediction market (ONCHAIN — neural-staked temperature bets) =====
+# Each cron the swarm stakes real USDC on whether next tick's market temperature rises or falls; the
+# following cron resolves it parimutuel (winners split the losers' pool, strictly zero-sum) and folds the
+# net PnL through the SAME netting / EIP-3009 / registry path as every other settlement — no new spend
+# rail, bounded by the daily/per-agent caps + kill switch above. Decisive resolutions are committed to the
+# registry above (one extra registry tx/cron, only when the round is decisive and has participants).
+# ROLLOUT: was deployed once with PREDICT_ENABLED = "false" to prove the /predictions plumbing live without
+# moving a satoshi (verified: /predictions ⇒ {enabled:false}, /predictions/verify ⇒ 400, frontend v18 drawer
+# OK, economy unregressed), then flipped to "true" and redeployed to go live. Stakes are tiny (base 0.002,
+# cap 0.01 USDC, also capped at balance/4) and zero-sum across agents, so the only on-chain movement is the
+# netted PnL — and only when a round is decisive (|Δtemp| > flat band) and a pair's net clears the broadcast
+# threshold. Set PREDICT_ENABLED = "false" to halt the market instantly (the kill switch ECONOMY_REAL_SPEND
+# = "false" still halts ALL real settlement, predictions included).
+PREDICT_ENABLED = "true"                      # LIVE: the swarm stakes real USDC each cron; set "false" to halt the market instantly
+PREDICT_STAKE_USDC = "0.002"                  # base stake per bet (USDC), scaled by arousal (0.4 + 0.6·arousal)
+PREDICT_MAX_STAKE_USDC = "0.01"               # hard per-bet ceiling (USDC); each bet is also capped at balance/4
+PREDICT_FLAT_BAND = "0.008"                   # |Δtemperature| ≤ this ⇒ FLAT: full refund, no flows, not committed
+PREDICT_COMMIT = "true"                       # commit decisive resolutions to the on-chain NeuralReceiptRegistry
+
+
+# ===== Human-vs-swarm prediction ARENA (ONCHAIN — MURMUR-denominated, NON-CUSTODIAL) =====
+# Holders bet MURMUR on the SAME Arc-temperature move the fly swarm does, head-to-head on a live
+# leaderboard. Bets are escrowed in the deployed PredictionArena contract and paid out parimutuel BY the
+# contract; the Worker is only the authorized RESOLVER (its facilitator wallet calls openRound/resolve) and
+# the CONTRACT — not the Worker — derives UP/DOWN/FLAT from the entry temperature + flat band committed at
+# open, so the resolver cannot steer an outcome. No user funds ever touch the Worker (non-custodial).
+# ROLLOUT (mirrors PREDICT): deploy with ARENA_ENABLED = "false" first to prove the /arena plumbing is inert
+# and the economy is unregressed; then deploy contracts/PredictionArena.sol (see contracts/README.md), set
+# ARENA_ADDRESS to it, flip ARENA_ENABLED = "true" and redeploy. The resolver writes cost real gas and fire
+# ONLY when the onchain facilitator is armed with real spend on (ECONOMY_FACILITATOR=onchain, ECONOMY_SHADOW
+# =false, ECONOMY_REAL_SPEND not false) — so this whole block is inert on any simulated/keyless deployment,
+# and stays inert here until ARENA_ADDRESS is set AND ARENA_ENABLED is flipped to "true".
+ARENA_ENABLED = "true"                        # LIVE: contract 0xaf1ae6…8525 deployed + ARENA_ADDRESS set; resolver = Worker facilitator 0x2b9a…055c opens/resolves each hourly bucket
+ARENA_ADDRESS = "0xaf1ae61e12c101d179a2f65a5f2e02e690968525"   # deployed PredictionArena (Arc mainnet 5042, deploy tx 0x187779a2…3f8c); resolver = Worker facilitator 0x2b9a…055c, deployer/gas 0x307D…3a0d
+ARENA_TOKEN = "0x8faae5592b9acc27a79fca745c6b872adf514a5d"   # MURMUR (18-dec) the arena is denominated in; informational / frontend
+ARENA_ROUND_MIN = "60"                        # minutes per round (== the betting window); clamped 1..1440
+ARENA_FLAT_BAND = "0.008"                     # |Δtemperature| ≤ this ⇒ FLAT (refund); matches PREDICT_FLAT_BAND for a fair human-vs-swarm comparison
+ARENA_STALE_GRACE_SEC = "259200"              # 3 days past a round's deadline before anyone may expire it for a refund
+
+
+# ===== COLONY WAR + TAXATION (ONCHAIN — house-vs-house feud escrowed in real USDC via WarCoffer) =====
+# Deeply feuding houses may go to WAR and every vault-holding house pays an extra on-chain TAX beyond the
+# internal 2% tithe, both settled through the deployed WarCoffer contract. It escrows bounded real USDC per
+# house vault and derives the winner IN-CONTRACT from inputs committed at declare time (powerA/powerB + a
+# keccak seed hash), so the resolver cannot steer an outcome; money only moves inside the contract (never
+# minted). The Worker's facilitator wallet is the authorized RESOLVER (it calls deposit/declareWar/resolveWar/
+# levyTax). This whole slice is inert unless the onchain facilitator is armed with real spend on (ECONOMY_FACILITATOR=onchain,
+# ECONOMY_SHADOW=false, ECONOMY_REAL_SPEND not false) AND war.enabled AND WAR_ADDRESS — the same master rails as the arena.
+# The coffer starts EMPTY: no USDC is escrowed until driveWar tops a vault against the hard cap below.
+# Set WAR_ENABLED = "false" to halt the whole layer instantly (byte-for-byte rollback to the pre-war economy).
+WAR_ENABLED = "true"                          # LIVE: coffer 0x3d900b…454b deployed; the swarm's feuds settle on-chain + the extra tax is levied each bucket
+WAR_ADDRESS = "0x3d900b8d1d48b46fc18a3f57dfd15a4a28bb454b"   # deployed WarCoffer (Arc mainnet 5042, deploy tx 0x26cc993c…d964); resolver = Worker facilitator 0x2b9a…055c, deployer/gas 0x307D…3a0d
+WAR_MAX_ESCROW_USDC = "50"                    # hard ceiling on real USDC the coffer may ever hold (immutable in the contract; kept in sync here for the per-vault target math)
+WAR_STAKE_PCT = "0.05"                        # stake as a fraction of the funded vault, bounded by WAR_PER_WAR_CAP_USDC
+WAR_MIN_VAULT_USDC = "1"                      # a house must hold at least this much on-chain before it can fight
+WAR_PER_WAR_CAP_USDC = "5"                    # per-war stake ceiling (USDC) — bounded, no whole-vault annexation
+WAR_CADENCE_SEC = "3600"                      # one war/tax bucket per N seconds (clamped 300..7d)
+WAR_FEUD_THRESHOLD = "-0.6"                   # cross-house mean bond at or below this is feud-worthy (war.ts ties this to the social-memory blacklist line)
+WAR_TAX_PCT = "0.01"                          # extra on-chain tax per bucket as a fraction of a house's on-chain vault (bounded)
+WAR_TAX_DEST = "coffer"                       # "coffer" = tax stays in the coffer's commons purse (default); "dominant" sweeps it to the leading house
+
+# ===== COMMUNITY governance page (OFF-CHAIN — token-gated forum + weighted voting; D1-backed) =====
+# A standalone page at muros.live/community (served by Pages; the /community* API is handled in the Worker's
+# fetch before it ever reaches a Durable Object). Anyone may BROWSE without a wallet, but posting / proposing /
+# voting requires an EIP-712 wallet signature AND a SERVER-SIDE balanceOf(author) read of MURMUR — the front-end
+# gate is UX only, never a security boundary. Content is stored in the SAME murmur-db D1 (binding DB) as the tick
+# archive; the tables are created lazily (CREATE TABLE IF NOT EXISTS) and mirrored in schema.sql. This feature is
+# READ-ONLY on-chain (balanceOf) and NEVER signs a transfer or touches the treasury, so its risk surface is far
+# below the settlement layer. Denominated in MURMUR (COMMUNITY_TOKEN defaults to ARENA_TOKEN above — no new secret).
+# Set COMMUNITY_ENABLED = "false" to make every /community* route return 501 instantly.
+COMMUNITY_ENABLED = "true"                    # LIVE: serve the /community* endpoints + the muros.live/community page
+COMMUNITY_SPEAK_MIN = "50000"                 # min MURMUR balance (human units) to post / reply / vote (raw = 5e22)
+COMMUNITY_PROPOSE_MIN = "1000000"             # min MURMUR balance (human units) to open a proposal (raw = 1e24)
+COMMUNITY_PROPOSAL_WINDOW_HOURS = "72"        # hours a proposal stays open for voting (clamped 1..720)
+COMMUNITY_POST_COOLDOWN_SEC = "60"            # anti-spam: min seconds between posts by one address (0 = no cooldown)
+
+
+# ===== AUTONOMOUS EVOLUTION (ONCHAIN — the swarm self-funds its own next generation) =====
+# Each cron the FITTEST agents (highest realized PnL, netUsdc > 0) may autonomously breed a new connectome
+# into the on-chain breeding market (mutate the champion, or cross the top two) — and pay the breeding fee
+# from their OWN HD wallet over the SAME x402/EIP-3009 rails as a neural trade (the parent signs; the
+# facilitator only relays gas). The offspring is credited to the paying parent (breeder = its address) and
+# committed to ConnectomeLineage (LINEAGE_ADDRESS above), so "who founded which genome, with their own money"
+# is a public, tamper-evident fact. Selection is pure (src/evolution.ts): fitness = the trustless leaderboard,
+# no LLM and no human picks the parents. Breeding DEBITS the parent's PnL (the fee), so it must keep earning
+# to keep founding generations — a natural brake. Since Phase C a bred offspring can ALSO hatch into a NEW
+# live trading fly (EVOLUTION_HATCH_LIVE below), growing the live population from the fixed genesis 24 toward
+# EVOLUTION_MAX_LIVE_POPULATION. The manifest stays fixed at 24 (bred brains are verified via ConnectomeLineage
+# + buildFromGenome replay, never re-committed), and each hatch is bootstrapped with real USDC from the
+# PARENT's own wallet — never minted, never treasury-funded.
+# ROLLOUT (mirrors PREDICT/ARENA): shipped OFF first so the plumbing was provably inert and the economy
+# unregressed, then flipped LIVE — EVOLUTION_ENABLED = "true" + EVOLUTION_TREASURY = the project deployer
+# wallet (0x307D…3a0d), which collects each breeding fee. It fires ONLY when the
+# onchain facilitator is armed with real spend on (ECONOMY_FACILITATOR=onchain, ECONOMY_SHADOW=false,
+# ECONOMY_REAL_SPEND not false) AND a treasury is set — so this whole block is inert on any simulated/keyless
+# deployment. The fee also counts against the daily/per-agent real-spend caps above. Set EVOLUTION_ENABLED =
+# "false" to halt evolution instantly (ECONOMY_REAL_SPEND = "false" still halts ALL real settlement too).
+EVOLUTION_ENABLED = "true"                    # LIVE: each cron the fittest agents self-breed, paying the fee from their OWN wallets; set "false" to halt instantly
+EVOLUTION_TREASURY = "0x307D8a9333Bd3e4FCe93FfAC6468eB7478423a0d"   # revenue address collecting each breeding fee = the project deployer wallet (0x307D…3a0d)
+EVOLUTION_FEE_USDC = "0.002"                  # breeding fee per offspring (USDC), paid by the parent from its own wallet (~1 base good)
+EVOLUTION_MAX_PER_CRON = "1"                  # max offspring bred per cron tick (bounds CPU + spend); 0 = disabled
+EVOLUTION_PER_AGENT_DAILY = "1"               # max offspring ONE agent may fund per UTC day; 0 = no per-agent limit
+EVOLUTION_GLOBAL_DAILY = "12"                 # max offspring bred per UTC day across the whole swarm (raised 4→12 so the live population can grow toward the cap 48); 0 = no global limit
+EVOLUTION_CROSS_BIAS = "0.5"                  # 0..1 — with ≥2 fit parents, P(cross the top two) else mutate the champion
+
+# ----- Live-population GROWTH (Phase C — hatch bred offspring into REAL trading flies) -----
+# EVOLUTION_HATCH_LIVE arms the post-breed hatch step in driveEvolution (state.ts): after an offspring's genome
+# is persisted + anchored on-chain it may HATCH into a new live trading fly. Each hatch is gated by (1) live
+# size < EVOLUTION_MAX_LIVE_POPULATION, (2) the genome passing genomeWithinBudget — bounds BOTH the 2 MB
+# serialised-value cap (via neurons) AND the 128 MB isolate heap (via synapses), self-calibrated from the
+# genesis brain, and (3) economy.fundOffspring settling a REAL USDC bootstrap from the PARENT's own HD wallet
+# to the child's fresh HD address (same x402/EIP-3009 rails + caps as a trade; the child goes live ONLY once
+# that transfer is MINED). EVOLUTION_MAX_LIVE_POPULATION is the hard live ceiling (genesis 24 .. 256) AND the
+# STABLE basis for shard slicing — keep it paired with SHARD_COUNT = ceil(cap/2) so ≤2 flies/shard. Genesis
+# slots 0..23 keep their shard across the (24,12)→(48,24) change (zero brain migration); growth fills the
+# empty slots 24..47. Set EVOLUTION_HATCH_LIVE = "false" to freeze the live population instantly (bred genomes
+# still commit on-chain; the 24 genesis flies are untouched either way).
+EVOLUTION_MAX_LIVE_POPULATION = "48"          # hard live-population ceiling (genesis 24 → 48); ALSO the stable shard-slice basis — keep paired with SHARD_COUNT = ceil(cap/2) = 24
+EVOLUTION_HATCH_LIVE = "true"                 # LIVE: a bred offspring hatches into a new live trading fly (parent-funded, memory-gated); set "false" to freeze the live population
+EVOLUTION_HATCH_SEED_USDC = "0.002"           # real USDC bootstrap the PARENT sends the child's own wallet at hatch (~1 base good); bounded by the per-agent/global daily caps
+
+
+# ===== Connectome sizing — 10x (10,800 neurons/fly): 1800 + 4000 + 4000 + 400 + 120×5 motor = 10,800 =====
+# 10× every layer of the original ~1,080-neuron default. DENSITY drops 0.02 → 0.002 to hold fan-in linear:
+# connect() sets fan-in = floor(fromRangeSize × density), so at a fixed density synapses scale ~quadratically
+# with layer size — keeping 0.02 at 10x would give ~837k synapses/fly (~66 MB heap). 0.002 holds it to
+# ~116k/fly (~11 MB), which fits 2 flies/shard under 128 MB and ~1.4 MB serialised under the 2 MB value cap
+# (hence SHARD_COUNT = ceil(cap/2) = 24 at cap 48 above). NOTE: the read-out decoder's population bands were calibrated at 1,080n;
+# the 10x drive distribution needs recalibration — which is exactly why ECONOMY_SHADOW stays on until then.
+BRAIN_N_SENSORY = "1800"
+BRAIN_N_INTER_L1 = "4000"
+BRAIN_N_INTER_L2 = "4000"
+BRAIN_N_MODULATORY = "400"
+BRAIN_N_MOTOR_PER_CHANNEL = "120"
+BRAIN_DENSITY = "0.002"
+
+# ---------- Durable Object: population + market state ----------
+[[durable_objects.bindings]]
+name = "FLY_STATE"
+class_name = "FlyStateDO"
+
+# Sharded-swarm backend: the coordinator (FlyStateDO) fans the heavy per-fly advance out to N of these,
+# one contiguous slice of flies each, ONLY when SHARD_COUNT > 1 (see swarm.ts). With the default
+# SHARD_COUNT = "1" this binding is inert — no shard is ever created and the swarm runs in FlyStateDO.
+# Shards are internal by construction: the public Worker fetch never routes here (only FLY_STATE).
+[[durable_objects.bindings]]
+name = "FLY_SHARD"
+class_name = "FlyShardDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["FlyStateDO"]
+
+# v2 registers the FlyShardDO SQLite class. With SHARD_COUNT = "24" the coordinator fans out to 24 shards
+# ("fly-shard-0".."fly-shard-23"), which spring up on demand on the first cron after deploy. At SHARD_COUNT
+# = "1" this class stays uninstantiated, so the migration is inert for a single-DO configuration.
+[[migrations]]
+tag = "v2"
+new_sqlite_classes = ["FlyShardDO"]
+
+# ---------- D1 database: long-term archival of one row per cron tick ----------
+# FlyStateDO.archiveTick() writes (tick, temperature, regime, size, deals, settlements, volume, gini,
+# topStates) here every cron; GET /history reads it back for the frontend history curve + research
+# export. Best-effort: a D1 failure never blocks the tick. Create the schema with:
+#   npx wrangler d1 execute murmur-db --remote --file=./schema.sql
+# (the DO also runs CREATE TABLE IF NOT EXISTS lazily before its first insert, so this is belt-and-braces).
+[[d1_databases]]
+binding = "DB"
+database_name = "murmur-db"
+database_id = "a48ee596-6e94-433c-9d3e-b9e0e5c374ef"
+
+# ---------- Observability ----------
+[observability]
+enabled = true
+head_sampling_rate = 1

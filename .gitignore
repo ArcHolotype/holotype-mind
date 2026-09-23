@@ -1,0 +1,49 @@
+# Dependencies
+node_modules/
+
+# Secrets — NEVER commit
+.dev.vars
+.env
+.env.local
+*.pk
+*.key
+# Circle API key staging file for the facilitator pre-flight probe — NEVER commit
+.circle-key.local
+# Holo private memory — the darkroom narration store + any local wallet/db files.
+# Holo's mind defaults these to the never-uploaded holotype-internal tree; these
+# patterns are defence-in-depth so a private DB can never be committed even if a
+# path is ever pointed inside the repo.
+*.sqlite
+*.sqlite3
+*.db
+packages/holo-mind/data/
+
+# Local one-off ops scripts (deploy preflight/verify/wipe) + generated registry address
+packages/trader-worker/scripts/_*.mjs
+packages/trader-worker/contracts/REGISTRY_ADDRESS.txt
+packages/trader-worker/contracts/LINEAGE_ADDRESS.txt
+
+# Build output
+dist/
+build/
+.wrangler/
+coverage/
+.cache/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Legacy pre-murmur artifacts (old fly-lineage renders) — excluded so they can never be
+# committed; the lineage/breeding system they depict no longer exists. Safe to delete locally.
+/family_tree_*.png
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.qoder/
