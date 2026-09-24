@@ -21,7 +21,12 @@ export interface DisclosureVerdict {
   reason: string;
 }
 
-const MAX_PUBLIC_CHARS = 500;
+// Coupled to the LLM maxTokens in heartbeat.ts (currently 600): a richer prompt draws
+// longer narrations, and any beat over this bound is dropped whole from the public feed.
+// Observed narrations have been climbing (486 -> 737 chars over a few hours), so 1200
+// leaves generous headroom above the current max rather than hugging it. If maxTokens is
+// raised again, raise this bound too so long beats are never silently dropped.
+const MAX_PUBLIC_CHARS = 1200;
 
 // A configured value must be at least this long to be treated as a secret to match,
 // so short or empty config entries cannot accidentally drop ordinary narration.

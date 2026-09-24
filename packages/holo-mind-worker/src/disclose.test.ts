@@ -51,8 +51,8 @@ test("shape bounds drop", () => {
   assert.equal(discloseGate(undefined).ok, false);
   assert.equal(discloseGate(42).ok, false);
   assert.equal(discloseGate("   ").ok, false);
-  assert.equal(discloseGate("x".repeat(501)).ok, false);
-  assert.equal(discloseGate("x".repeat(500)).ok, true);
+  assert.equal(discloseGate("x".repeat(1201)).ok, false);
+  assert.equal(discloseGate("x".repeat(1200)).ok, true);
 });
 
 test("selectDisclosable keeps order and drops only failing rows", () => {
