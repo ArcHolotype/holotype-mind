@@ -82,6 +82,42 @@ export async function getPurchaseByKey(db: D1Database, purchaseKey: string): Pro
   );
 }
 
+// Purchases created today that have COMMITTED to paying (approved or beyond) — backs the
+// code-enforced x402 daily cap. A 'prepared' row (card created, not yet paid) and a 'failed'
+// row (expired unsettled, safe to re-prepare) do NOT count against the cap; only money that
+// is actually on its way out the door does.
+export async function countX402CommittedToday(db: D1Database, dayPrefix: string): Promise<number> {
+  const r = await db
+    .prepare(
+      `SELECT COUNT(*) AS c FROM holo_x402_purchases
+       WHERE created_at LIKE ?1 AND status IN ('approved','in_flight','settled','uncertain')`,
+    )
+    .bind(`${dayPrefix}%`)
+    .first<{ c: number }>();
+  return Number(r?.c ?? 0);
+}
+
+// Recent purchases (newest first) for the creator console. Read-only.
+export async function listX402Purchases(db: D1Database, limit = 50): Promise<X402PurchaseRow[]> {
+  const n = Math.min(200, Math.max(1, limit));
+  const { results } = await db
+    .prepare(`SELECT * FROM holo_x402_purchases ORDER BY id DESC LIMIT ?1`)
+    .bind(n)
+    .all<X402PurchaseRow>();
+  return results ?? [];
+}
+
+// Delete a purchase row that reconcile already marked 'failed' (its authorization expired
+// unsettled, so no money moved and none can). This frees the unique purchase_key so a mission
+// whose seller window lapsed can be re-prepared. Refuses to touch any non-failed row.
+export async function clearFailedPurchase(db: D1Database, purchaseKey: string): Promise<boolean> {
+  const res = await db
+    .prepare(`DELETE FROM holo_x402_purchases WHERE purchase_key = ?1 AND status = 'failed'`)
+    .bind(purchaseKey)
+    .run();
+  return Number(res.meta.changes ?? 0) === 1;
+}
+
 // Creator-gated in the real flow: flips prepared -> approved and stamps the approval record.
 export async function approvePurchase(db: D1Database, purchaseKey: string, by: string): Promise<boolean> {
   const res = await db

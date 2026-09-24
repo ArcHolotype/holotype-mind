@@ -12,7 +12,7 @@ import { base } from "viem/chains";
 import type { Env, RuntimeConfig } from "./config.js";
 import { assertWalletIntegrity } from "./wallet.js";
 import { getMission, setMissionStatus, setMissionTxHash } from "./store.js";
-import { rpcCall, withRpcFallback, hexToUint, TRANSFER_TOPIC } from "./rpc.js";
+import { rpcCall, withRpcFallback, hexToUint, TRANSFER_TOPIC, assertPayeeIsWallet } from "./rpc.js";
 
 const BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
 const DECIMALS_SELECTOR = "0x313ce567";
@@ -87,6 +87,13 @@ export async function payApprovedMission(env: Env, cfg: RuntimeConfig, id: numbe
   if (!isAddress(recipient)) return { ok: false, reason: "recipient is not a valid address" };
   const amountUsd = m.reward_cents / 100;
   if (!(amountUsd > 0)) return { ok: false, reason: "non-positive amount" };
+
+  // Payee safety: refuse to send to a contract address (EOA-only). Checked BEFORE the slot
+  // claim so a refusal leaves the mission 'approved' and retryable rather than stuck 'paying'.
+  // Fail-closed: an unverifiable payee (rpc error) is refused, not paid.
+  const payeeUrls = m.chain === "base" ? cfg.baseRpcUrls : cfg.arcRpcUrls;
+  const payeeOk = await assertPayeeIsWallet(payeeUrls, recipient);
+  if (!payeeOk.ok) return { ok: false, reason: payeeOk.reason };
 
   // 3. Atomic slot claim (concurrency double-pay guard).
   const claimed = await claimPaymentSlot(env.DB, id);

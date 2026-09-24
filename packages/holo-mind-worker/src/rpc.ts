@@ -138,3 +138,35 @@ export async function readBlockTimestamp(url: string, blockNumber: number): Prom
   };
   return Number(hexToUint(blk?.timestamp ?? "0x0"));
 }
+
+// ---- payee safety: refuse to pay a contract (EOA-only) ----
+// An externally-owned account (a normal wallet) has no deployed code, so eth_getCode returns
+// "0x". A contract returns its bytecode. Sending value to a plain wallet is inert, but sending
+// to a contract can run arbitrary receive/fallback logic, so BOTH payout rails (vanilla pay.ts
+// and the x402 buyer rail) verify the destination is an EOA before any transfer is signed.
+export async function isContractAddress(url: string, address: string): Promise<boolean> {
+  const code = await rpcCall(url, "eth_getCode", [address, "latest"]);
+  if (typeof code !== "string") throw new Error("eth_getCode returned a non-string");
+  const body = code.replace(/^0x/, "");
+  return body.length > 0 && body !== "0";
+}
+
+// Fail-closed: when the check cannot be completed (no urls configured, or every rpc errored)
+// we treat the payee as unsafe and REFUSE, rather than pay an unverified destination. Money
+// safety outweighs availability here — a transient rpc failure just means "retry later".
+export async function assertPayeeIsWallet(
+  urls: string[],
+  address: string,
+): Promise<{ ok: boolean; reason?: string }> {
+  if (urls.length === 0) {
+    return { ok: false, reason: "no rpc urls configured to verify the payee is a wallet (EOA-only)" };
+  }
+  try {
+    const isContract = await withRpcFallback(urls, (url) => isContractAddress(url, address));
+    return isContract
+      ? { ok: false, reason: `payee ${address} is a contract; refusing to pay (wallet/EOA only)` }
+      : { ok: true };
+  } catch (e) {
+    return { ok: false, reason: `could not verify the payee is a wallet (EOA check failed): ${(e as Error).message}` };
+  }
+}

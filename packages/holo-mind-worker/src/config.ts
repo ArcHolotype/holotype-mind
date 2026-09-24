@@ -22,8 +22,14 @@ export interface Env {
   PER_CALL_FEE_USD: string;
   PRIVATE_CONTEXT_N: string;
   MODULATORY_TOPK: string; // how many modulatory neurons a thought maps onto; <=0 = whole layer
-  NECTAR_MAX_PER_DAY?: string; // hard cap on new Nectar missions per UTC day (default 3)
-  NECTAR_MAX_PER_MISSION_USD?: string; // hard cap on one mission's reward (default 5)
+  NECTAR_MAX_PER_DAY?: string; // hard cap on new Nectar missions per UTC day (default 5)
+  NECTAR_MAX_PER_MISSION_USD?: string; // hard cap on one mission's reward (default 1)
+  // x402 buyer rail caps — SEPARATE from the vanilla Nectar caps above (different payment
+  // path: EIP-3009 buyer signature vs a plain on-chain transfer). Both default to $1/purchase
+  // and 5 purchases/UTC day.
+  X402_MAX_PER_PURCHASE_USD?: string; // hard cap on ONE x402 buyer purchase (default 1)
+  X402_MAX_PER_DAY?: string; // hard cap on x402 purchases per UTC day (default 5)
+  X402_MAX_TIMEOUT_SECONDS?: string; // longest validity window we will sign (default 300; seller may bound it lower)
 
   // Public on-chain read surface (all public info; the wallet address is Holo's own)
   PUBLIC_WALLET_ADDRESS?: string;
@@ -63,6 +69,9 @@ export interface RuntimeConfig {
   modulatoryTopK: number;
   nectarMaxPerDay: number;
   nectarMaxPerMissionCents: number;
+  x402MaxPerPurchaseCents: number;
+  x402MaxPerDay: number;
+  x402MaxTimeoutSeconds: number;
   walletKey?: string;
   masterKeyHex?: string;
   creatorToken?: string;
@@ -82,8 +91,11 @@ export function readConfig(env: Env): RuntimeConfig {
     perCallFeeUsd: asNum(env.PER_CALL_FEE_USD, 0.001),
     privateContextN: Math.max(0, Math.floor(asNum(env.PRIVATE_CONTEXT_N, 8))),
     modulatoryTopK: Math.floor(asNum(env.MODULATORY_TOPK, 10)),
-    nectarMaxPerDay: Math.max(1, Math.floor(asNum(env.NECTAR_MAX_PER_DAY, 3))),
-    nectarMaxPerMissionCents: Math.max(1, Math.round(asNum(env.NECTAR_MAX_PER_MISSION_USD, 5) * 100)),
+    nectarMaxPerDay: Math.max(1, Math.floor(asNum(env.NECTAR_MAX_PER_DAY, 5))),
+    nectarMaxPerMissionCents: Math.max(1, Math.round(asNum(env.NECTAR_MAX_PER_MISSION_USD, 1) * 100)),
+    x402MaxPerPurchaseCents: Math.max(1, Math.round(asNum(env.X402_MAX_PER_PURCHASE_USD, 1) * 100)),
+    x402MaxPerDay: Math.max(1, Math.floor(asNum(env.X402_MAX_PER_DAY, 5))),
+    x402MaxTimeoutSeconds: Math.max(1, Math.floor(asNum(env.X402_MAX_TIMEOUT_SECONDS, 300))),
     walletKey: env.HOLO_WALLET_KEY?.trim() || undefined,
     masterKeyHex: env.HOLO_MASTER_KEY?.trim() || undefined,
     creatorToken: env.CREATOR_TOKEN?.trim() || undefined,

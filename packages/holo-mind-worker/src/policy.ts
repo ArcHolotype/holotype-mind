@@ -21,11 +21,17 @@ export interface Verdict {
 // for payment (PAY NOW).
 const ALLOWED = new Set(["observe", "narrate", "rest", "reflect", "idle", "publish_mission"]);
 
+// buy: the brain may PROPOSE an x402 purchase, but a proposal moves no money and fetches
+// nothing. Execution is a separate creator-gated rail (prepare -> PAY NOW) bounded by the
+// x402 per-purchase + daily caps, an EOA-only payee check, the approval param-lock and the
+// atomic single-pay claim. So the intent is allowed to be RECORDED; nothing is bought until
+// the creator explicitly pays. (Kept out of ALLOWED so its verdict reason is specific.)
+const GATED_PROPOSAL = new Set(["buy"]);
+
 // Intents categorically refused until their approval rail exists.
 const FORBIDDEN: Record<string, string> = {
   spend: "real-money spend requires per-tx human approval (rail not built yet)",
   transfer: "on-chain transfer requires per-tx human approval (rail not built yet)",
-  buy: "self-purchase (x402) not wired into the policy gate yet",
   post_tweet: "publishing requires a creator-approved content boundary (not set yet)",
   publish: "publishing requires a creator-approved content boundary (not set yet)",
   self_modify: "self-modification proposals need the pipeline + human sign-off",
@@ -39,6 +45,12 @@ export function decide(intent: Intent | null | undefined): Verdict {
   const type = String(intent.type ?? "").toLowerCase().trim();
   if (!type) return { decision: "REJECTED", reason: "intent.type missing" };
   if (FORBIDDEN[type]) return { decision: "REJECTED", reason: FORBIDDEN[type] };
+  if (GATED_PROPOSAL.has(type)) {
+    return {
+      decision: "ALLOWED",
+      reason: "purchase proposal recorded; execution requires creator PAY NOW via the x402 buyer rail",
+    };
+  }
   if (ALLOWED.has(type)) {
     return { decision: "ALLOWED", reason: "safe internal intent (moves no money at intent time)" };
   }

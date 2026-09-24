@@ -18,6 +18,8 @@ import { readUsdcBalances } from "./rpc.js";
 import { walletIntegrityOk } from "./wallet.js";
 import { consoleHtml } from "./console.js";
 import { payApprovedMission, reconcileMission } from "./pay.js";
+import { prepareX402Purchase, executeX402Purchase, getOrPrepareX402Purchase } from "./x402buy.js";
+import { listX402Purchases, reconcileX402Purchase, getPurchaseByKey } from "./x402guard.js";
 import {
   addPrivate,
   recentPrivate,
@@ -34,6 +36,7 @@ import {
   setMissionClaim,
   setMissionDelivery,
   setMissionApproval,
+  setMissionTxHash,
   countMissionsSince,
   sumReservedTodayCents,
 } from "./store.js";
@@ -73,10 +76,21 @@ async function claimOrDelivery(env: Env, id: number, action: "claim" | "delivery
   const summary = String(body?.summary ?? "").trim();
   const artifact = String(body?.artifact ?? "").trim();
   const recipient = String(body?.recipient ?? "").trim();
+  const x402Endpoint = String(body?.x402Endpoint ?? "").trim();
   const evidence = Array.isArray(body?.evidence) ? body.evidence.map((e: unknown) => String(e).trim()) : [];
   const criteria = safeJson(m.criteria, []);
-  if (!summary || !artifact || !recipient || evidence.length !== criteria.length) {
-    return json({ error: "summary, artifact, recipient and one evidence entry per criterion required" }, 400);
+  // The seller picks the payout rail by what it delivers: a wallet address -> a vanilla
+  // on-chain transfer; an x402 resource endpoint -> Holo buys the resource via the x402
+  // buyer rail (the seller's own facilitator settles). Exactly one is required.
+  const rail = x402Endpoint ? "x402" : recipient ? "vanilla" : "";
+  if (!summary || !artifact || !rail || evidence.length !== criteria.length) {
+    return json({ error: "summary, artifact, one evidence entry per criterion, and EITHER recipient (wallet) OR x402Endpoint required" }, 400);
+  }
+  if (recipient && x402Endpoint) {
+    return json({ error: "provide EITHER recipient (vanilla payout) OR x402Endpoint (x402 purchase), not both" }, 400);
+  }
+  if (rail === "x402" && !/^https?:\/\//i.test(x402Endpoint)) {
+    return json({ error: "x402Endpoint must be a valid http(s) url" }, 400);
   }
   if (!["claimed", "changes_requested"].includes(m.status)) {
     return json({ error: `cannot deliver (status=${m.status})` }, 409);
@@ -88,6 +102,8 @@ async function claimOrDelivery(env: Env, id: number, action: "claim" | "delivery
       summary,
       artifact,
       recipient,
+      x402Endpoint,
+      rail,
       evidence,
       taskHash: String(body?.taskHash ?? ""),
       submittedAt: new Date().toISOString(),
@@ -236,6 +252,11 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     if (!m) return notFound();
     const delivery = safeJson(m.delivery);
     const approval = safeJson(m.approval);
+    const isX402 = delivery?.rail === "x402";
+    // For an x402 settlement the purchase row IS the verifiable proof: the on-chain tx, the
+    // EIP-3009 nonce and payer, and the AuthorizationUsed event topic anyone can re-scan to
+    // confirm the authorization was consumed on-chain (authorizer = Holo's wallet, nonce).
+    const purchase = isX402 ? await getPurchaseByKey(env.DB, `mission-${m.id}`) : null;
     return json({
       worker: "holotype-mind",
       mission: {
@@ -257,13 +278,40 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
             taskHash: delivery.taskHash || null,
             submittedAt: delivery.submittedAt,
             evidence: delivery.evidence,
+            rail: delivery.rail ?? "vanilla",
           }
         : null,
       approval: approval
-        ? { by: approval.by, at: approval.at, amountCents: approval.amountCents, nonce: approval.nonce }
+        ? { by: approval.by, at: approval.at, amountCents: approval.amountCents, nonce: approval.nonce, rail: approval.rail ?? "vanilla" }
         : null,
       settlement: m.tx_hash
-        ? { tx_hash: m.tx_hash, chain: m.chain, recipient: delivery?.recipient ?? null }
+        ? {
+            tx_hash: m.tx_hash,
+            chain: m.chain,
+            method: isX402 ? "x402" : "transfer",
+            recipient: isX402 ? (purchase?.pay_to ?? null) : (delivery?.recipient ?? null),
+          }
+        : null,
+      // Present only for an x402 settlement: the buyer-side proof that this was an EIP-3009
+      // x402 purchase (not a plain transfer), verifiable against the chain by anyone.
+      x402: purchase
+        ? {
+            method: "x402",
+            scheme: "exact",
+            asset_transfer_method: "eip3009",
+            network: purchase.network,
+            asset: purchase.asset,
+            payer: purchase.payer,
+            pay_to: purchase.pay_to,
+            amount_atomic: purchase.amount,
+            amount_usd: Number(purchase.amount) / 1e6,
+            nonce: purchase.nonce,
+            tx_hash: purchase.tx_hash,
+            status: purchase.status,
+            // Re-scan this asset for AuthorizationUsed(authorizer=payer, nonce) to verify on-chain.
+            authorization_used_topic: "0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5",
+            receipt: safeJson(purchase.receipt),
+          }
         : null,
     });
   }
@@ -400,7 +448,7 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
   if (path === "/creator/missions" && method === "GET") {
     return json({ missions: await listMissions(env.DB, { limit: 100 }) });
   }
-  const missionAction = path.match(/^\/creator\/missions\/(\d+)\/(claim|delivery|check|approve|cancel|pay|reconcile)$/);
+  const missionAction = path.match(/^\/creator\/missions\/(\d+)\/(claim|delivery|check|approve|cancel|pay|reconcile|x402-quote|x402-pay)$/);
   if (missionAction && method === "POST") {
     const id = Number(missionAction[1]);
     const action = missionAction[2];
@@ -419,7 +467,7 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
         !!d &&
         !!d.summary &&
         !!d.artifact &&
-        !!d.recipient &&
+        (!!d.recipient || !!d.x402Endpoint) &&
         Array.isArray(d.evidence) &&
         d.evidence.length === criteria.length &&
         d.evidence.every((e: unknown) => String(e).trim());
@@ -430,6 +478,9 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     if (action === "approve") {
       if (m.status !== "approval_pending") return json({ error: `not awaiting approval (status=${m.status})` }, 409);
       const d = safeJson(m.delivery);
+      if (d?.rail === "x402") {
+        return json({ error: "x402 missions settle via PAY NOW (x402-quote -> x402-pay), not vanilla approve" }, 409);
+      }
       // The approval record locks the exact payment params; batch 3 refuses to sign any
       // transfer without a matching fresh record. No money moves here (tx_hash stays null).
       const approval = {
@@ -443,15 +494,75 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
       await setMissionApproval(env.DB, id, JSON.stringify(approval));
       return json({ ok: true, id, status: "approved", unpaid: true, approval });
     }
+    if (action === "x402-quote") {
+      // Creator opened the PAY NOW dialog: fetch the seller's live 402 terms and lock them into
+      // a review card (purchaseKey = mission-<id>). Moves NO money and signs nothing. The amount
+      // is bounded by the mission's agreed reward AND the x402 per-purchase cap.
+      if (!["approval_pending", "approved"].includes(m.status)) {
+        return json({ error: `not awaiting payment (status=${m.status})` }, 409);
+      }
+      const d = safeJson(m.delivery);
+      if (d?.rail !== "x402" || !d?.x402Endpoint) {
+        return json({ error: "this mission is not an x402 delivery (no x402Endpoint)" }, 409);
+      }
+      const r = await getOrPrepareX402Purchase(env, cfg, {
+        url: String(d.x402Endpoint),
+        purchaseKey: `mission-${id}`,
+        maxAmountCents: m.reward_cents,
+      });
+      return json(r, r.ok ? 200 : 409);
+    }
+    if (action === "x402-pay") {
+      // The creator's single PAY NOW for an x402 mission: sign the prepared authorization and
+      // settle through the seller's facilitator. Real money. Gated behind wallet integrity, the
+      // x402 caps, the EOA-only payee check, the approval param-lock and the atomic single-pay claim.
+      if (!["approval_pending", "approved"].includes(m.status)) {
+        return json({ error: `not awaiting payment (status=${m.status})` }, 409);
+      }
+      const d = safeJson(m.delivery);
+      if (d?.rail !== "x402") return json({ error: "this mission is not an x402 delivery" }, 409);
+      const purchaseKey = `mission-${id}`;
+      const r = await executeX402Purchase(env, cfg, purchaseKey);
+      if (r.ok && r.transaction) {
+        // Record the creator approval + settle the mission with the x402 tx as its evidence.
+        const row = await getPurchaseByKey(env.DB, purchaseKey);
+        const approval = {
+          by: "creator",
+          at: new Date().toISOString(),
+          missionId: id,
+          rail: "x402",
+          amountCents: Math.round((r.amountUsd ?? 0) * 100),
+          purchaseKey,
+          nonce: row?.nonce ?? null,
+          payTo: row?.pay_to ?? null,
+          network: row?.network ?? null,
+        };
+        await setMissionApproval(env.DB, id, JSON.stringify(approval));
+        await setMissionTxHash(env.DB, id, r.transaction);
+        return json({ ...r, id, status: "completed" }, 200);
+      }
+      // An ambiguous outcome (signed but settlement unconfirmed) parks the mission so it is never
+      // blindly re-paid; reconcile reads the chain (AuthorizationUsed) before allowing a retry.
+      if (r.status === "uncertain") {
+        await setMissionStatus(env.DB, id, "payment_uncertain");
+      }
+      return json({ ...r, id }, 409);
+    }
     if (action === "pay") {
-      // Real on-chain settlement. Gated behind the approval record + integrity + atomic
-      // slot inside payApprovedMission; this call is the creator's explicit per-tx go.
+      // Real on-chain settlement (vanilla rail). Gated behind the approval record + integrity +
+      // atomic slot inside payApprovedMission; this call is the creator's explicit per-tx go.
       const r = await payApprovedMission(env, cfg, id);
       return json(r, r.ok ? 200 : 409);
     }
     if (action === "reconcile") {
-      // Only meaningful for a mission parked in payment_uncertain; verifies on-chain
-      // before recording a tx, or resets to approved only after a scan finds no payment.
+      // Only meaningful for a mission parked in payment_uncertain. An x402 mission reconciles
+      // through the purchase row (AuthorizationUsed scan); a vanilla mission through pay.ts.
+      const d = safeJson(m.delivery);
+      if (d?.rail === "x402") {
+        const r = await reconcileX402Purchase(env.DB, cfg, `mission-${id}`);
+        if (r.ok && r.settled && r.txHash) await setMissionTxHash(env.DB, id, r.txHash);
+        return json(r, r.ok ? 200 : 409);
+      }
       const r = await reconcileMission(env, cfg, id, {
         txHash: typeof body?.txHash === "string" ? body.txHash : undefined,
         reset: body?.reset === true,
@@ -462,6 +573,40 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
       await setMissionStatus(env.DB, id, "cancelled");
       return json({ ok: true, id, status: "cancelled" });
     }
+  }
+
+  // ---- x402 buyer rail (creator-token gated) ----
+  // prepare builds the review card and moves NO money; pay is the creator's single PAY NOW
+  // (approve + sign + settle). Both are bounded by the x402 per-purchase + daily caps, the
+  // EOA-only payee check, the approval param-lock and the atomic single-pay claim.
+  if (path === "/creator/x402/prepare" && method === "POST") {
+    const body = await readBody(req);
+    const url = String(body?.url ?? "").trim();
+    const purchaseKey = String(body?.purchaseKey ?? "").trim() || `x402-${crypto.randomUUID()}`;
+    const r = await prepareX402Purchase(env, cfg, {
+      url,
+      purchaseKey,
+      method: String(body?.method ?? "").toUpperCase() === "POST" ? "POST" : "GET",
+      body: body?.body,
+    });
+    return json(r, r.ok ? 200 : 409);
+  }
+  if (path === "/creator/x402/pay" && method === "POST") {
+    const body = await readBody(req);
+    const purchaseKey = String(body?.purchaseKey ?? "").trim();
+    if (!purchaseKey) return json({ error: "purchaseKey required" }, 400);
+    const r = await executeX402Purchase(env, cfg, purchaseKey);
+    return json(r, r.ok ? 200 : 409);
+  }
+  if (path === "/creator/x402/purchases" && method === "GET") {
+    return json({ purchases: await listX402Purchases(env.DB, 100) });
+  }
+  if (path === "/creator/x402/reconcile" && method === "POST") {
+    const body = await readBody(req);
+    const purchaseKey = String(body?.purchaseKey ?? "").trim();
+    if (!purchaseKey) return json({ error: "purchaseKey required" }, 400);
+    const r = await reconcileX402Purchase(env.DB, cfg, purchaseKey);
+    return json(r, r.ok ? 200 : 409);
   }
 
   return notFound();

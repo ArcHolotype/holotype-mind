@@ -112,7 +112,18 @@ function rpcStub(results: Record<string, unknown>) {
     return new Response(JSON.stringify(payload), { status: 200, headers: { "content-type": "application/json" } });
   };
 }
-const failingRpc = async () => new Response("boom", { status: 500 });
+// eth_getCode answers "0x" (an EOA) so the payee-safety gate passes; every other method
+// fails, so the base decimals pre-flight throws and the send parks as payment_uncertain.
+const eoaThenFailRpc = async (_url: unknown, init: { body?: string }) => {
+  const body = JSON.parse(init?.body ?? "{}");
+  if (body.method === "eth_getCode") {
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id ?? 1, result: "0x" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  return new Response("boom", { status: 500 });
+};
 
 const realFetch = globalThis.fetch;
 function withFetch(stub: (...args: never[]) => unknown, fn: () => Promise<void>) {
@@ -189,22 +200,37 @@ test("pay refuses an invalid recipient address even when approval matches", asyn
   assert.match(r.reason ?? "", /not a valid address/i);
 });
 
-test("pay refuses the losing side of a concurrent claim (atomic slot guard)", async () => {
-  // Mission looks payable, but the conditional UPDATE claims 0 rows because another
-  // caller already flipped approved -> paying. The second send must not happen.
-  const { db, state } = fakeD1(mission(), { claimChanges: 0 });
-  const r = await payApprovedMission(envOf(db), cfg(), 1);
-  assert.equal(r.ok, false);
-  assert.match(r.reason ?? "", /slot not claimed/i);
-  assert.equal(state.row?.status, "approved"); // untouched, never sent
-});
+test(
+  "pay refuses the losing side of a concurrent claim (atomic slot guard)",
+  withFetch(rpcStub({ eth_getCode: "0x" }), async () => {
+    // Mission looks payable (recipient is an EOA), but the conditional UPDATE claims 0 rows
+    // because another caller already flipped approved -> paying. The second send must not happen.
+    const { db, state } = fakeD1(mission(), { claimChanges: 0 });
+    const r = await payApprovedMission(envOf(db), cfg(), 1);
+    assert.equal(r.ok, false);
+    assert.match(r.reason ?? "", /slot not claimed/i);
+    assert.equal(state.row?.status, "approved"); // untouched, never sent
+  }),
+);
+
+test(
+  "pay refuses a recipient that is a contract (EOA-only payee safety)",
+  withFetch(rpcStub({ eth_getCode: "0x6080604052" }), async () => {
+    const { db, state } = fakeD1(mission());
+    const r = await payApprovedMission(envOf(db), cfg(), 1);
+    assert.equal(r.ok, false);
+    assert.match(r.reason ?? "", /is a contract/i);
+    assert.equal(state.row?.status, "approved"); // refused before the slot claim, retryable
+  }),
+);
 
 // ---- failure handling: a send that cannot confirm parks as payment_uncertain ----
 
 test(
   "pay parks the mission as payment_uncertain when the broadcast cannot complete",
-  withFetch(failingRpc, async () => {
-    // base chain: the decimals pre-flight RPC fails, so the send throws before broadcast.
+  withFetch(eoaThenFailRpc, async () => {
+    // base chain: the payee EOA check passes, then the decimals pre-flight RPC fails, so the
+    // send throws before broadcast.
     const { db, state } = fakeD1(mission({ chain: "base" }));
     const r = await payApprovedMission(envOf(db), cfg(), 1);
     assert.equal(r.ok, false);

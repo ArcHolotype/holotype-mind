@@ -63,8 +63,14 @@ PER_BEAT_CAP_USD = "1"             # per-beat cost ALARM (post-hoc). maxTokens=3
                                    # beat is recorded with costOverCap=true. NOT a pre-call refusal.
 PER_CALL_FEE_USD = "0.001"         # BlockRun x402 per-call chain fee, added to token cost.
 PRIVATE_CONTEXT_N = "8"            # how many recent private (creator) messages to inject per beat.
-NECTAR_MAX_PER_DAY = "3"           # hard cap on new Nectar missions per UTC day (autonomous or creator).
-NECTAR_MAX_PER_MISSION_USD = "5"   # hard cap on ONE mission's reward (test used 1; restored to 5 after first settled mission).
+NECTAR_MAX_PER_DAY = "5"           # hard cap on new Nectar missions per UTC day (autonomous or creator).
+NECTAR_MAX_PER_MISSION_USD = "1"   # hard cap on ONE mission's reward (vanilla payout rail).
+# x402 buyer rail caps — a SEPARATE payment path from the vanilla Nectar transfer above
+# (Holo signs an EIP-3009 authorization to buy a resource from an x402 seller). Same ceiling
+# the user set for both rails: $1 per purchase, 5 purchases per UTC day.
+X402_MAX_PER_PURCHASE_USD = "1"    # hard cap on ONE x402 buyer purchase.
+X402_MAX_PER_DAY = "5"             # hard cap on x402 purchases per UTC day.
+X402_MAX_TIMEOUT_SECONDS = "300"   # longest authorization validity window we will sign (a seller may bound it lower).
 MODULATORY_TOPK = "10"             # coupling stage ① (light up the front end, A2): each thought maps onto this many MODULATORY
                                    # neurons (top-K by live MEMBRANE potential — that layer never spikes),
                                    # stored in darkroom.neuron_indices.
