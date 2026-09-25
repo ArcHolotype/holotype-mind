@@ -18,7 +18,7 @@ import { readUsdcBalances } from "./rpc.js";
 import { walletIntegrityOk } from "./wallet.js";
 import { consoleHtml } from "./console.js";
 import { payApprovedMission, reconcileMission } from "./pay.js";
-import { maybeCadencePost, broadcastPublish, broadcastSettlement } from "./broadcast.js";
+import { maybeCadencePost, broadcastPublish, broadcastSettlement, maybeIngestCorpus, requiredByPace, isBehindPace } from "./broadcast.js";
 import { prepareX402Purchase, executeX402Purchase, getOrPrepareX402Purchase } from "./x402buy.js";
 import { listX402Purchases, reconcileX402Purchase, getPurchaseByKey } from "./x402guard.js";
 import {
@@ -41,6 +41,12 @@ import {
   countMissionsSince,
   sumReservedTodayCents,
   recentXPosts,
+  countXSelfSentToday,
+  countXSentAllToday,
+  getXSchedule,
+  countCorpus,
+  countCorpusByTopic,
+  listCorpus,
 } from "./store.js";
 
 const json = (data: unknown, status = 200): Response =>
@@ -634,10 +640,69 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     return json({ posts: await recentXPosts(env.DB, n) });
   }
 
+  // GET /creator/x/schedule — when the next self-post becomes eligible, and how today's counts
+  // stand against the floor and both ceilings. Read-only.
+  if (path === "/creator/x/schedule" && method === "GET") {
+    const day = new Date().toISOString().slice(0, 10);
+    const sched = await getXSchedule(env.DB);
+    const selfSent = await countXSelfSentToday(env.DB, day);
+    const sentAll = await countXSentAllToday(env.DB, day);
+    return json({
+      day,
+      next_eligible_at: sched.next_eligible_at,
+      last_gap_minutes: sched.last_gap_minutes,
+      self_sent_today: selfSent,
+      sent_all_today: sentAll,
+      floor: cfg.xPostMinPerDay,
+      required_by_now: requiredByPace(cfg.xPostMinPerDay, new Date()),
+      behind_pace: isBehindPace(selfSent, cfg.xPostMinPerDay, new Date()),
+      self_ceiling: cfg.xPostMaxPerDay,
+      plan_ceiling: cfg.xGlobalMaxPerDay,
+      corpus_rows: await countCorpus(env.DB),
+    });
+  }
+
+  // ---- Corpus ops (creator-gated) ----
+  // POST /creator/x/corpus/ingest — run one reading batch now. Same code path the slow cron
+  // uses; each batch is bounded to a few topics so one invocation stays well inside the Worker
+  // subrequest ceiling. Costs no money: the sources are keyless public science APIs.
+  if (path === "/creator/x/corpus/ingest" && method === "POST") {
+    const body = await readBody(req);
+    const maxTopics = body?.maxTopics == null ? undefined : Number(body.maxTopics);
+    const r = await maybeIngestCorpus(env, { maxTopics: Number.isFinite(maxTopics as number) ? maxTopics : undefined });
+    return json(r);
+  }
+  // GET /creator/x/corpus?n=&topic= — what Holo is allowed to read. Inspectable on purpose.
+  if (path === "/creator/x/corpus" && method === "GET") {
+    const n = Math.min(200, Math.max(1, Number(url.searchParams.get("n") ?? "10")));
+    const topic = url.searchParams.get("topic");
+    return json({
+      total: await countCorpus(env.DB),
+      by_topic: await countCorpusByTopic(env.DB),
+      items: await listCorpus(env.DB, n, topic),
+    });
+  }
+
   return notFound();
 }
 
+// The slow "reading" cron, kept separate from the 15-minute tick so posting never waits on the
+// network. Must match the second entry in wrangler.toml [triggers].crons.
+const INGEST_CRON = "23 3 * * *";
+
 async function handleScheduled(event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+  // The daily corpus top-up. Bounded per run (a few topics = a handful of subrequests) so it
+  // stays inside the free-tier limits, and best-effort: a dead science API only means fewer new
+  // excerpts, never a missed post.
+  if (event.cron === INGEST_CRON) {
+    ctx.waitUntil(
+      maybeIngestCorpus(env)
+        .then((r) => console.log(`corpus ingest stored=${r.stored} rejected=${r.rejected} dup=${r.duplicate} total=${r.total}${r.skipped ? ` skipped=${r.skipped}` : ""}${r.errors.length ? ` errors=${r.errors.join(";")}` : ""}`))
+        .catch((e: any) => console.error(`corpus ingest error: ${e?.message ?? e}`)),
+    );
+    return;
+  }
+
   // beat() is self-guarding; we just fire it and log a one-line, secret-free summary.
   ctx.waitUntil(
     beat(env)
@@ -652,14 +717,15 @@ async function handleScheduled(event: ScheduledEvent, env: Env, ctx: ExecutionCo
       })
       .catch((e: any) => console.error(`beat error: ${e?.message ?? e}`)),
   );
-  // X self-broadcast cadence (③). maybeCadencePost is self-guarding (enabled + key + interval
-  // + daily cap + budget) and runs its cheap pre-checks before any model call, so firing it
-  // every tick is free unless a post is actually due. Fully inert until the user arms it.
+  // X self-broadcast cadence (③). maybeCadencePost is self-guarding (enabled + key + caps +
+  // budget + schedule) and runs its cheap pre-checks before any model call, so firing it every
+  // tick costs nothing unless a post is actually due. Fully inert until the user arms it.
   ctx.waitUntil(
     maybeCadencePost(env)
       .then((r) => {
         if (r && "posted" in r && r.posted) console.log(`x broadcast posted id=${r.id ?? "?"}`);
         else if (r && "skipped" in r) console.log(`x broadcast skipped: ${r.skipped}`);
+        else if (r && "reason" in r) console.log(`x broadcast ${r.status}: ${r.reason}`);
       })
       .catch((e: any) => console.error(`x broadcast error: ${e?.message ?? e}`)),
   );

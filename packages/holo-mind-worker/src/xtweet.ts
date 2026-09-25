@@ -9,13 +9,18 @@
 // that trips a check is recorded status='dropped' and NOT sent (we never redact-and-send, so
 // a partial leak is not representable):
 //   1. disarmed     — broadcast disabled or no OpenTweet key => nothing posts (inert).
-//   2. cadence      — at least postIntervalHours since the last sent post.
-//   3. daily caps   — posts/day and replies/day counted from SENT rows only.
-//   4. no-repeat    — dedup hash of the text must not match a recent sent post.
-//   5. content gate — the MODEL-GENERATED PROSE passes discloseGate (secrets / 64-hex key
+//   2. caps         — a global per-day ceiling across every kind of post (the plan gives them
+//                     one shared bucket), a lower per-day ceiling on self-posts so an event
+//                     broadcast always has room, a per-day reply ceiling, and a minimum-gap
+//                     backstop on the rhythm. All counted from SENT rows in the log.
+//   3. no-repeat    — dedup hash of the text must not match a recent sent post, and word
+//                     overlap against recent posts must stay under the similarity ceiling.
+//   4. content gate — the MODEL-GENERATED PROSE passes discloseGate (secrets / 64-hex key
 //                     shape / addresses outside the public frame / links / non-ascii /
 //                     reserved terms) PLUS an identity check (first-person Holo; it may not
 //                     deny being Holo or claim to be another product).
+//   5. token gate   — model-authored prose may not carry a cashtag, a trading pair, or the
+//                     name/ticker of any token but its own.
 //   6. final scan   — the composed text (prose + trusted suffix) is re-scanned for literal
 //                     secret values and the 280-char bound before it leaves.
 //
@@ -37,8 +42,12 @@ export function broadcastConfig(cfg: RuntimeConfig, baseUrl = cfg.openTweetBaseU
     apiKey: cfg.openTweetApiKey,
     enabled: cfg.xBroadcastEnabled,
     baseUrl,
-    postIntervalHours: cfg.xPostIntervalHours,
+    // The catch-up gap is deliberately shorter than the normal random gap, so the backstop here
+    // takes the smaller of the two: it exists to stop a caller from rapid-firing, not to enforce
+    // the rhythm (the rhythm lives in the schedule table).
+    minGapMinutes: Math.max(1, Math.min(cfg.xGapMinMinutes, cfg.xBehindGapMinutes)),
     postMaxPerDay: cfg.xPostMaxPerDay,
+    globalMaxPerDay: cfg.xGlobalMaxPerDay,
     replyMaxPerDay: cfg.xReplyMaxPerDay,
     maxChars: 280,
     publicWallet: cfg.publicWallet,
@@ -53,8 +62,9 @@ export interface XBroadcastConfig {
   apiKey?: string; // OpenTweet ot_ key; absent => disarmed
   enabled: boolean; // broadcast kill switch
   baseUrl: string; // OpenTweet base url
-  postIntervalHours: number;
-  postMaxPerDay: number;
+  minGapMinutes: number; // hard floor between two self-posts; the random gap is drawn above it
+  postMaxPerDay: number; // ceiling on self-posts per UTC day
+  globalMaxPerDay: number; // ceiling on ALL kinds per UTC day (the plan's single bucket)
   replyMaxPerDay: number;
   maxChars: number; // X character bound for the composed text (default 280)
   publicWallet: string; // allowed address in prose
@@ -67,6 +77,8 @@ export interface XBroadcastConfig {
 // The subset of the D1 store this rail needs. Injected so the gate is testable without D1.
 export interface XPostStore {
   countXSentSince(dayPrefix: string, kind: XPostKind): Promise<number>;
+  countXSentAllToday(dayPrefix: string): Promise<number>;
+  countXSelfSentToday(dayPrefix: string): Promise<number>;
   lastXSentAt(kind: XPostKind): Promise<string | null>;
   recentXHashes(n: number): Promise<string[]>;
   recentXTexts(n: number): Promise<string[]>;
@@ -81,6 +93,8 @@ export interface XPostStore {
     opentweetId?: string | null;
     inReplyTo?: string | null;
     postedAt?: string;
+    corpusId?: number | null;
+    angle?: string | null;
   }): Promise<number>;
 }
 
@@ -167,6 +181,51 @@ export function contentGate(prose: string, cfg: XBroadcastConfig): { ok: boolean
   return { ok: true, reason: "ok" };
 }
 
+// Full token names, matched case-insensitively on word boundaries. Words that are also ordinary
+// English (optimism, polygon, render, jupiter, near, ton, apt, link, meme) are deliberately NOT
+// here: banning them would silently drop legitimate prose far more often than it would catch a
+// token reference. Those are still caught by the cashtag rule below.
+const TOKEN_NAMES: readonly string[] = [
+  "bitcoin", "ethereum", "solana", "dogecoin", "shiba inu", "cardano", "ripple", "avalanche",
+  "polkadot", "chainlink", "tether", "usdc", "usdt", "usd coin", "uniswap", "litecoin", "tron",
+  "binance coin", "pepe", "bonk", "floki", "worldcoin", "arbitrum", "aptos", "celestia",
+  "bittensor", "dogwifhat",
+];
+
+// Tickers, matched case-SENSITIVELY: an all-caps run is how a ticker is actually written, and
+// requiring case keeps lowercase English words out of the net.
+const TOKEN_TICKERS: readonly string[] = [
+  "BTC", "ETH", "SOL", "DOGE", "SHIB", "BNB", "XRP", "ADA", "AVAX", "MATIC", "LINK", "TON",
+  "TRX", "DOT", "USDT", "USDC", "WIF", "BONK", "FLOKI", "LTC", "UNI", "AAVE", "SUI", "APT",
+  "ARB", "OP", "NEAR", "INJ", "TIA", "SEI", "JUP", "PYTH", "WLD", "RNDR", "FET", "TAO",
+  "BRETT", "MOG", "SPX", "GIGA", "PEPE",
+];
+
+// Token discipline: Holo may speak about its own token (its CA is whitelisted in the address
+// gate) and about nothing else's. Two shapes are caught — a cashtag and a known name/ticker.
+// HONEST LIMIT: a token can be described without ever being named ("that dog coin"), and no
+// denylist closes that. What is guaranteed is narrower and real: no other token's address can
+// appear (the address gate rejects any 40-hex outside the public frame), no cashtag can appear,
+// and no name on this list can appear.
+export function tokenGate(prose: string): { ok: boolean; reason: string } {
+  const cashtag = prose.match(/\$\s*[A-Za-z]{2,10}\b/);
+  if (cashtag) return { ok: false, reason: `cashtag ${cashtag[0].trim()}` };
+  const pair = prose.match(/\b[A-Z]{2,10}\/USD[T]?\b/);
+  if (pair) return { ok: false, reason: `trading pair ${pair[0]}` };
+  const lowered = prose.toLowerCase();
+  for (const name of TOKEN_NAMES) {
+    if (new RegExp(`\\b${name.replace(/ /g, "\\s+")}\\b`, "i").test(lowered)) {
+      return { ok: false, reason: `names another token (${name})` };
+    }
+  }
+  for (const t of TOKEN_TICKERS) {
+    if (new RegExp(`(^|[^A-Za-z0-9])${t}([^A-Za-z0-9]|$)`).test(prose)) {
+      return { ok: false, reason: `names another token (${t})` };
+    }
+  }
+  return { ok: true, reason: "ok" };
+}
+
 // Compose the final tweet: gated prose + a code-controlled trusted suffix (tx hash / links /
 // amounts). The suffix is appended AFTER gating and is then re-scanned for literal secrets and
 // the character bound, so a trusted-looking suffix can still never carry a key out.
@@ -228,7 +287,15 @@ function publishState(o?: OpenTweetPost | null): { published: boolean; failed: b
 export async function postTweet(
   cfg: XBroadcastConfig,
   store: XPostStore,
-  opts: { prose: string; suffix?: string; trigger?: string; ref?: string | null; kind?: XPostKind },
+  opts: {
+    prose: string;
+    suffix?: string;
+    trigger?: string;
+    ref?: string | null;
+    kind?: XPostKind;
+    corpusId?: number | null;
+    angle?: string | null;
+  },
   deps: XTweetDeps = {},
 ): Promise<PostResult> {
   const fetchImpl = deps.fetchImpl ?? fetch;
@@ -251,6 +318,8 @@ export async function postTweet(
       status,
       gateReason: reason,
       postedAt: nowDate.toISOString(),
+      corpusId: opts.corpusId ?? null,
+      angle: opts.angle ?? null,
     });
     return { posted: false, status, reason, rowId };
   };
@@ -259,22 +328,30 @@ export async function postTweet(
   if (!cfg.enabled) return drop("broadcast disabled");
   if (!cfg.apiKey) return drop("no OpenTweet key (disarmed)");
 
-  // 2/3. cadence + daily caps, counted from SENT rows.
+  // 2. Caps, counted from SENT rows in the log (never from a cached counter, which can drift).
+  //    The plan gives every kind of post one shared bucket, so the global ceiling is checked
+  //    first; self-posts get a lower ceiling of their own so an event broadcast always has room.
   const today = dayPrefix(nowDate);
+  const sentAll = await store.countXSentAllToday(today);
+  if (sentAll >= cfg.globalMaxPerDay) return drop(`daily plan cap reached (${sentAll}/${cfg.globalMaxPerDay})`);
   if (kind === "post") {
+    // Backstop on the rhythm. The schedule table decides when a self-post is due; this only
+    // stops a caller (or a bug in the schedule) from firing twice inside the minimum gap.
     const last = await store.lastXSentAt("post");
     if (last) {
-      const elapsedH = (nowDate.getTime() - new Date(last).getTime()) / 3_600_000;
-      if (elapsedH < cfg.postIntervalHours) return drop(`cadence: ${elapsedH.toFixed(1)}h < ${cfg.postIntervalHours}h`);
+      const elapsedMin = (nowDate.getTime() - new Date(last).getTime()) / 60_000;
+      if (elapsedMin < cfg.minGapMinutes) return drop(`gap: ${elapsedMin.toFixed(0)}min < ${cfg.minGapMinutes}min`);
     }
-    const postsToday = await store.countXSentSince(today, "post");
-    if (postsToday >= cfg.postMaxPerDay) return drop(`daily post cap reached (${postsToday})`);
+    if (opts.trigger === "cadence") {
+      const selfToday = await store.countXSelfSentToday(today);
+      if (selfToday >= cfg.postMaxPerDay) return drop(`daily self-post cap reached (${selfToday})`);
+    }
   } else {
     const repliesToday = await store.countXSentSince(today, "reply");
     if (repliesToday >= cfg.replyMaxPerDay) return drop(`daily reply cap reached (${repliesToday})`);
   }
 
-  // 4. no-repeat: exact-duplicate hash, then near-duplicate word overlap against recent posts
+  // 3. no-repeat: exact-duplicate hash, then near-duplicate word overlap against recent posts
   //    (the signature is stripped so it does not inflate similarity). This is what enforces
   //    "do not keep saying the same thing in different words".
   const recent = await store.recentXHashes(40);
@@ -287,9 +364,19 @@ export async function postTweet(
     }
   }
 
-  // 5. content gate on the model prose.
+  // 4. content gate on the model prose.
   const gated = contentGate(opts.prose, cfg);
   if (!gated.ok) return drop(`content gate: ${gated.reason}`);
+
+  // 5. token discipline on model-authored prose: Holo speaks about itself, never about someone
+  //    else's token. The address layer already rejects any 40-hex outside the public frame; this
+  //    covers the two ways a token shows up without an address — a cashtag and a well-known name.
+  //    Applied to cadence posts (the model's own words) and not to the event templates, whose
+  //    text is code-composed from verified mission data.
+  if (opts.trigger === "cadence") {
+    const tokened = tokenGate(opts.prose);
+    if (!tokened.ok) return drop(`token gate: ${tokened.reason}`);
+  }
 
   // 6. final scan on the composed text.
   const scanned = finalScan(text, cfg);
@@ -375,6 +462,8 @@ export async function postTweet(
       gateReason: "publish unconfirmed after poll; recorded sent to prevent a duplicate",
       opentweetId: id,
       postedAt: nowDate.toISOString(),
+      corpusId: opts.corpusId ?? null,
+      angle: opts.angle ?? null,
     });
     return { posted: true, status: "sent", reason: "publish unconfirmed (recorded sent)", id, url, rowId };
   }
@@ -388,6 +477,8 @@ export async function postTweet(
     status: "sent",
     opentweetId: id,
     postedAt: nowDate.toISOString(),
+    corpusId: opts.corpusId ?? null,
+    angle: opts.angle ?? null,
   });
   return { posted: true, status: "sent", reason: "ok", id, url, rowId };
 }

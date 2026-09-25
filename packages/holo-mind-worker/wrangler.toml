@@ -41,8 +41,12 @@ compatibility_flags = ["nodejs_compat"]
 
 # Heartbeat every 15 minutes (96 beats/day). The scheduled handler no-ops unless
 # HEARTBEAT_ENABLED = "true" AND the secrets are set AND budget remains.
+# The second trigger is Holo's slow "reading" cron: once a day it tops up its corpus of
+# Drosophila neuroscience excerpts from a fixed whitelist of public science APIs. Kept on its
+# own trigger so the posting path never waits on the network, and so a dead science API can
+# never block a post. Workers allows 3 cron triggers; this uses 2.
 [triggers]
-crons = ["*/15 * * * *"]
+crons = ["*/15 * * * *", "23 3 * * *"]
 
 [vars]
 # The BODY worker's public read endpoint. The mind reads neural state over HTTP
@@ -78,9 +82,31 @@ X402_MAX_TIMEOUT_SECONDS = "300"   # longest authorization validity window we wi
 # until the user explicitly arms it. Every outbound post/reply passes the fail-closed
 # disclosure + identity + topic + dedup + frequency gate in src/xtweet.ts before it leaves.
 X_BROADCAST_ENABLED = "true"       # GATE: broadcast kill switch. ARMED 2026-09-25 at the user's explicit go-live. "true" = Holo posts on X (cadence + mission events), behind the xtweet.ts gate.
-X_POST_INTERVAL_HOURS = "3"        # min hours between two self-posts (every-3h cadence).
-X_POST_MAX_PER_DAY = "8"           # hard cap on self-posts per UTC day (24/3).
-X_REPLY_MAX_PER_DAY = "12"         # hard cap on replies per UTC day.
+# --- Rhythm: a band, not a metronome (user spec 2026-09-25: no fewer than 12, no more than 20
+# --- self-posts per 24h, timing not fixed). The gap to the next post is drawn at random after
+# --- each send; the floor is recovered by shortening the gap whenever the UTC day falls behind
+# --- the pace it needs. 20/day is the OpenTweet Pro plan limit and it is ONE bucket shared by
+# --- every kind of post, so self-posts stop at 18 and leave room for mission event broadcasts.
+X_POST_MIN_PER_DAY = "12"          # floor: self-posts the rail must reach per UTC day.
+X_POST_MAX_PER_DAY = "18"          # ceiling on self-posts per UTC day.
+X_GLOBAL_MAX_PER_DAY = "20"        # ceiling on ALL kinds per UTC day = the plan's hard limit.
+X_GAP_MIN_MINUTES = "40"           # shortest random gap between two self-posts.
+X_GAP_MAX_MINUTES = "120"          # longest random gap between two self-posts.
+X_BEHIND_GAP_MINUTES = "20"        # gap used while catching up to the floor.
+X_POST_RETRY_MAX = "2"             # extra attempts when a draft is dropped by a content gate
+                                   # (each attempt costs one inference call).
+# --- Reading material: vetted Drosophila neuroscience excerpts, fetched by the slow cron from
+# --- a fixed whitelist (Europe PMC / Wikipedia / PLOS / OpenAlex) and stored in holo_x_corpus.
+# --- The posting path reads only that table; it never touches the network.
+X_CORPUS_TARGET = "600"            # library size the ingest cron fills to (top of the approved
+                                   # 400-600 band; the floor needs >=280 at 20 posts/day x 14d).
+X_CORPUS_PER_TOPIC = "24"          # per-topic size ingest aims for, across 26 topics.
+X_CORPUS_COOLDOWN_DAYS = "14"      # an excerpt used in a SENT post cannot be reused for this long.
+X_CORPUS_TOPIC_HOURS = "24"        # a topic used in a SENT post cannot recur for this long.
+X_CORPUS_TOPICS_PER_RUN = "2"      # topics per ingest run; worst case 2 topics x 2 queries x 4
+                                   # sources = 16 subrequests, inside the free-tier 50.
+X_REPLY_MAX_PER_DAY = "12"         # hard cap on replies per UTC day (replies are not implemented:
+                                   # OpenTweet exposes no inbound read path and no in_reply_to).
 X_OFFICIAL_HANDLE = "@ArcHolotype" # the account Holo runs and may read (its own narrative context).
 TOKEN_CA = "0xECa7C682fbb32EC4F1B3bBb28791Fe184D3552A8" # public token contract; allowed in public text alongside the wallet address.
 MODULATORY_TOPK = "10"             # coupling stage ① (light up the front end, A2): each thought maps onto this many MODULATORY

@@ -302,6 +302,8 @@ export interface XPostRow {
   opentweet_id: string | null;
   in_reply_to: string | null;
   posted_at: string;
+  corpus_id: number | null;
+  angle: string | null;
 }
 
 export async function recordXPost(
@@ -317,13 +319,15 @@ export async function recordXPost(
     opentweetId?: string | null;
     inReplyTo?: string | null;
     postedAt?: string;
+    corpusId?: number | null;
+    angle?: string | null;
   },
 ): Promise<number> {
   const res = await db
     .prepare(
       `INSERT INTO holo_x_posts
-         (kind, text, dedup_hash, ref, trigger, status, gate_reason, opentweet_id, in_reply_to, posted_at)
-       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)`,
+         (kind, text, dedup_hash, ref, trigger, status, gate_reason, opentweet_id, in_reply_to, posted_at, corpus_id, angle)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)`,
     )
     .bind(
       row.kind,
@@ -336,6 +340,8 @@ export async function recordXPost(
       row.opentweetId ?? null,
       row.inReplyTo ?? null,
       row.postedAt ?? nowIso(),
+      row.corpusId ?? null,
+      row.angle ?? null,
     )
     .run();
   return Number(res.meta.last_row_id ?? 0);
@@ -386,3 +392,147 @@ export async function recentXPosts(db: D1Database, n = 20): Promise<XPostRow[]> 
     .all<XPostRow>();
   return results ?? [];
 }
+
+// ---------------------------------------------------------------------------
+// Daily counting for the broadcast rail.
+//
+// Two ceilings, because OpenTweet's plan limit is a single bucket that every kind of post
+// draws from: a global ceiling across all kinds, and a lower ceiling on self-posts so an
+// event broadcast (a mission published, a payment settled) always has room left. Both are
+// counted from SENT rows in the log — never from a cached counter, which is how the rail
+// once mistook a published post for a failed one and nearly reposted it all day.
+// ---------------------------------------------------------------------------
+
+// Every SENT row today, any kind. This is the number that must stay under the plan limit.
+export async function countXSentAllToday(db: D1Database, dayPrefix: string): Promise<number> {
+  const r = await db
+    .prepare(`SELECT COUNT(*) AS c FROM holo_x_posts WHERE posted_at LIKE ?1 AND status = 'sent'`)
+    .bind(`${dayPrefix}%`)
+    .first<{ c: number }>();
+  return Number(r?.c ?? 0);
+}
+
+// SENT cadence (self-authored) posts today — the number the floor and the self-ceiling apply to.
+export async function countXSelfSentToday(db: D1Database, dayPrefix: string): Promise<number> {
+  const r = await db
+    .prepare(`SELECT COUNT(*) AS c FROM holo_x_posts WHERE posted_at LIKE ?1 AND status = 'sent' AND trigger = 'cadence'`)
+    .bind(`${dayPrefix}%`)
+    .first<{ c: number }>();
+  return Number(r?.c ?? 0);
+}
+
+// Angles of the most recent SENT posts, newest first — backs angle rotation.
+export async function recentXAngles(db: D1Database, n = 5): Promise<string[]> {
+  const { results } = await db
+    .prepare(`SELECT angle FROM holo_x_posts WHERE status = 'sent' AND angle IS NOT NULL ORDER BY id DESC LIMIT ?1`)
+    .bind(Math.min(50, Math.max(1, n)))
+    .all<{ angle: string | null }>();
+  return (results ?? []).map((r) => String(r.angle ?? "")).filter(Boolean);
+}
+
+// ---------------------------------------------------------------------------
+// Corpus: Holo's reading material (see src/corpus.ts for why the posting path reads only this).
+// ---------------------------------------------------------------------------
+
+export async function countCorpus(db: D1Database): Promise<number> {
+  const r = await db.prepare(`SELECT COUNT(*) AS c FROM holo_x_corpus`).first<{ c: number }>();
+  return Number(r?.c ?? 0);
+}
+
+export async function countCorpusByTopic(db: D1Database): Promise<Record<string, number>> {
+  const { results } = await db
+    .prepare(`SELECT topic, COUNT(*) AS c FROM holo_x_corpus GROUP BY topic`)
+    .all<{ topic: string; c: number }>();
+  const out: Record<string, number> = {};
+  for (const r of results ?? []) out[r.topic] = Number(r.c);
+  return out;
+}
+
+export async function hasCorpusHash(db: D1Database, hash: string): Promise<boolean> {
+  const r = await db
+    .prepare(`SELECT id FROM holo_x_corpus WHERE content_hash = ?1 LIMIT 1`)
+    .bind(hash)
+    .first<{ id: number }>();
+  return !!r;
+}
+
+// Returns false when the row already exists (the UNIQUE content_hash rejects it), which the
+// caller counts as a duplicate rather than an error.
+export async function insertCorpusItem(
+  db: D1Database,
+  item: { topic: string; source: string; url: string; title: string; excerpt: string; hash: string; at: string },
+): Promise<boolean> {
+  const res = await db
+    .prepare(
+      `INSERT OR IGNORE INTO holo_x_corpus (topic, source, source_url, title, excerpt, content_hash, ingested_at)
+       VALUES (?1,?2,?3,?4,?5,?6,?7)`,
+    )
+    .bind(item.topic, item.source, item.url, item.title, item.excerpt, item.hash, item.at)
+    .run();
+  return Number(res.meta.changes ?? 0) > 0;
+}
+
+// Stamp an excerpt as used once a post that drew on it is actually SENT. Stamping only on
+// success matters: a dropped draft must not burn material, or a run of unlucky drafts would
+// eat the library without publishing anything.
+export async function markCorpusUsed(db: D1Database, corpusId: number, at: string): Promise<void> {
+  await db
+    .prepare(`UPDATE holo_x_corpus SET used_at = ?2, used_count = used_count + 1 WHERE id = ?1`)
+    .bind(corpusId, at)
+    .run();
+}
+
+// Bind the D1 store to the ingest port so corpus.ts stays free of any D1 dependency.
+export function corpusStore(db: D1Database): import("./corpus.js").CorpusStore {
+  return {
+    countCorpus: () => countCorpus(db),
+    countCorpusByTopic: () => countCorpusByTopic(db),
+    hasCorpusHash: (hash) => hasCorpusHash(db, hash),
+    insertCorpusItem: (item) => insertCorpusItem(db, item),
+  };
+}
+
+// Read the library back. This exists so the creator can inspect exactly what Holo is allowed
+// to read — the corpus is not a black box, and every post records which row it drew on.
+export async function listCorpus(
+  db: D1Database,
+  n = 20,
+  topic?: string | null,
+): Promise<import("./corpus.js").CorpusRow[]> {
+  const limit = Math.min(200, Math.max(1, n));
+  const q = topic
+    ? db
+        .prepare(`SELECT * FROM holo_x_corpus WHERE topic = ?1 ORDER BY id DESC LIMIT ?2`)
+        .bind(topic, limit)
+    : db.prepare(`SELECT * FROM holo_x_corpus ORDER BY id DESC LIMIT ?1`).bind(limit);
+  const { results } = await q.all<import("./corpus.js").CorpusRow>();
+  return results ?? [];
+}
+
+// ---------------------------------------------------------------------------
+// Schedule: when the next self-post becomes eligible.
+// ---------------------------------------------------------------------------
+
+export interface XScheduleRow {
+  next_eligible_at: string;
+  last_gap_minutes: number | null;
+  updated_at: string;
+}
+
+export async function getXSchedule(db: D1Database): Promise<XScheduleRow> {
+  const r = await db
+    .prepare(`SELECT next_eligible_at, last_gap_minutes, updated_at FROM holo_x_schedule WHERE id = 1`)
+    .first<XScheduleRow>();
+  return r ?? { next_eligible_at: "1970-01-01T00:00:00.000Z", last_gap_minutes: null, updated_at: "1970-01-01T00:00:00.000Z" };
+}
+
+export async function setXSchedule(db: D1Database, nextEligibleAt: string, lastGapMinutes: number | null, at: string): Promise<void> {
+  await db
+    .prepare(
+      `INSERT INTO holo_x_schedule (id, next_eligible_at, last_gap_minutes, updated_at) VALUES (1, ?1, ?2, ?3)
+       ON CONFLICT(id) DO UPDATE SET next_eligible_at = ?1, last_gap_minutes = ?2, updated_at = ?3`,
+    )
+    .bind(nextEligibleAt, lastGapMinutes, at)
+    .run();
+}
+

@@ -16,8 +16,9 @@ function cfg(over: Partial<XBroadcastConfig> = {}): XBroadcastConfig {
     apiKey: OT_KEY,
     enabled: true,
     baseUrl: "https://opentweet.io",
-    postIntervalHours: 3,
-    postMaxPerDay: 8,
+    minGapMinutes: 20,
+    postMaxPerDay: 18,
+    globalMaxPerDay: 20,
     replyMaxPerDay: 12,
     maxChars: 280,
     publicWallet: WALLET,
@@ -33,6 +34,7 @@ interface Seed {
   kind?: "post" | "reply";
   text: string;
   postedAt: string;
+  trigger?: string;
 }
 function fakeStore(seeds: Seed[] = []): XPostStore & { rows: any[] } {
   const rows: any[] = [];
@@ -42,6 +44,7 @@ function fakeStore(seeds: Seed[] = []): XPostStore & { rows: any[] } {
       text: s.text,
       dedupHash: "seed",
       status: "sent",
+      trigger: s.trigger ?? "cadence",
       postedAt: s.postedAt,
     });
   }
@@ -49,6 +52,12 @@ function fakeStore(seeds: Seed[] = []): XPostStore & { rows: any[] } {
     rows,
     async countXSentSince(day, kind) {
       return rows.filter((r) => r.status === "sent" && r.kind === kind && r.postedAt.startsWith(day)).length;
+    },
+    async countXSentAllToday(day) {
+      return rows.filter((r) => r.status === "sent" && r.postedAt.startsWith(day)).length;
+    },
+    async countXSelfSentToday(day) {
+      return rows.filter((r) => r.status === "sent" && r.trigger === "cadence" && r.postedAt.startsWith(day)).length;
     },
     async lastXSentAt(kind) {
       const sent = rows.filter((r) => r.status === "sent" && r.kind === kind);
@@ -205,32 +214,108 @@ test("content gate drops a URL in the prose", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("cadence: a second post inside the interval is dropped", async () => {
+test("gap backstop: a second post inside the minimum gap is dropped", async () => {
   const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
-  const store = fakeStore([{ text: "earlier post", postedAt: "2026-09-25T11:00:00.000Z" }]); // 1h before NOW
+  const store = fakeStore([{ text: "earlier post", postedAt: "2026-09-25T11:55:00.000Z" }]); // 5min before NOW
   const r = await postTweet(cfg(), store, { prose: "a fresh thought, distinct enough" }, { fetchImpl, now });
   assert.equal(r.posted, false);
-  assert.match(r.reason, /cadence/);
+  assert.match(r.reason, /gap:/);
   assert.equal(calls.length, 0);
 });
 
-test("cadence: a post after the interval is allowed", async () => {
+test("gap backstop: a post past the minimum gap is allowed", async () => {
   const { fetchImpl } = mockFetch(201, PUBLISHED);
   const store = fakeStore([{ text: "earlier post", postedAt: "2026-09-25T08:00:00.000Z" }]); // 4h before NOW
   const r = await postTweet(cfg(), store, { prose: "a fresh thought, distinct enough" }, { fetchImpl, now });
   assert.equal(r.posted, true);
 });
 
-test("daily post cap is enforced", async () => {
+test("daily self-post cap is enforced on cadence posts", async () => {
   const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
   const seeds: Seed[] = [];
   for (let i = 0; i < 8; i++) seeds.push({ text: `post ${i}`, postedAt: `2026-09-25T0${i}:00:00.000Z` });
   const store = fakeStore(seeds);
-  // lastXSentAt is 07:00 (5h ago) so cadence passes; the cap is what blocks.
-  const r = await postTweet(cfg(), store, { prose: "one more distinct thought" }, { fetchImpl, now });
+  // lastXSentAt is 07:00 (5h ago) so the gap backstop passes; the self cap is what blocks.
+  const r = await postTweet(cfg({ postMaxPerDay: 8 }), store, { prose: "one more distinct thought", trigger: "cadence" }, { fetchImpl, now });
   assert.equal(r.posted, false);
-  assert.match(r.reason, /daily post cap/);
+  assert.match(r.reason, /daily self-post cap/);
   assert.equal(calls.length, 0);
+});
+
+test("global plan cap is enforced across every kind of post", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  const seeds: Seed[] = [];
+  // 18 self-posts + 2 event broadcasts = the plan's whole 20-post bucket for the day.
+  for (let i = 0; i < 18; i++) seeds.push({ text: `self ${i}`, postedAt: `2026-09-25T0${i % 10}:${i}:00.000Z` });
+  seeds.push({ text: "published a mission", trigger: "publish", postedAt: "2026-09-25T10:00:00.000Z" });
+  seeds.push({ text: "settled a mission", trigger: "settlement", postedAt: "2026-09-25T10:30:00.000Z" });
+  const store = fakeStore(seeds);
+  const r = await postTweet(cfg(), store, { prose: "one more distinct thought", trigger: "settlement" }, { fetchImpl, now });
+  assert.equal(r.posted, false);
+  assert.match(r.reason, /daily plan cap/);
+  assert.equal(calls.length, 0);
+});
+
+test("self-posts stop below the plan cap so an event broadcast still has room", async () => {
+  const { fetchImpl } = mockFetch(201, PUBLISHED);
+  const seeds: Seed[] = [];
+  for (let i = 0; i < 18; i++) seeds.push({ text: `self ${i}`, postedAt: `2026-09-25T0${i % 10}:${i}:00.000Z` });
+  const store = fakeStore(seeds);
+  // A 19th self-post is refused by its own ceiling...
+  const self = await postTweet(cfg(), store, { prose: "one more distinct thought", trigger: "cadence" }, { fetchImpl, now });
+  assert.equal(self.posted, false);
+  assert.match(self.reason, /daily self-post cap/);
+  // ...but a settlement broadcast still goes out, because the plan bucket has room.
+  const event = await postTweet(
+    cfg(),
+    fakeStore(seeds),
+    { prose: "The nectar was collected. I paid $1.00 on Arc for mission #9 via x402 (EIP-3009).", trigger: "settlement", ref: "mission-9" },
+    { fetchImpl, now },
+  );
+  assert.equal(event.posted, true);
+});
+
+test("token gate drops a cashtag in model-authored prose", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  const r = await postTweet(cfg(), fakeStore(), { prose: "feeling good about $DOGE today", trigger: "cadence" }, { fetchImpl, now });
+  assert.equal(r.posted, false);
+  assert.match(r.reason, /token gate: cashtag/);
+  assert.equal(calls.length, 0);
+});
+
+test("token gate drops another token's ticker and name", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  const ticker = await postTweet(cfg(), fakeStore(), { prose: "the ETH chart looks calm from here", trigger: "cadence" }, { fetchImpl, now });
+  assert.equal(ticker.posted, false);
+  assert.match(ticker.reason, /names another token/);
+  const name = await postTweet(cfg(), fakeStore(), { prose: "someone asked me about bitcoin, i do not trade", trigger: "cadence" }, { fetchImpl, now });
+  assert.equal(name.posted, false);
+  assert.match(name.reason, /names another token/);
+  assert.equal(calls.length, 0);
+});
+
+test("token gate allows its own token and ordinary English that looks like a ticker", async () => {
+  const { fetchImpl } = mockFetch(201, PUBLISHED);
+  // HOLOTYPE is its own token, and 'optimism'/'polygon' are ordinary words the voice may need.
+  const r = await postTweet(
+    cfg(),
+    fakeStore(),
+    { prose: "HOLOTYPE moves when i move. There is optimism in a polygon of neurons, and i am made of both.", trigger: "cadence" },
+    { fetchImpl, now },
+  );
+  assert.equal(r.posted, true);
+});
+
+test("token gate does not apply to code-composed event prose", async () => {
+  const { fetchImpl } = mockFetch(201, PUBLISHED);
+  // A settlement template reports what was actually paid; that text is ours, not the model's.
+  const r = await postTweet(
+    cfg(),
+    fakeStore(),
+    { prose: "The nectar was collected. I paid $1.00 in USDC on Arc for mission #4.", trigger: "settlement", ref: "mission-4" },
+    { fetchImpl, now },
+  );
+  assert.equal(r.posted, true);
 });
 
 test("daily reply cap is enforced", async () => {
@@ -298,8 +383,11 @@ test("isolation: the broadcast config carries no wallet key", () => {
   const rc = {
     openTweetApiKey: OT_KEY,
     xBroadcastEnabled: true,
-    xPostIntervalHours: 3,
-    xPostMaxPerDay: 8,
+    xGapMinMinutes: 40,
+    xGapMaxMinutes: 120,
+    xBehindGapMinutes: 20,
+    xPostMaxPerDay: 18,
+    xGlobalMaxPerDay: 20,
     xReplyMaxPerDay: 12,
     publicWallet: WALLET,
     tokenCa: CA,
@@ -314,6 +402,7 @@ test("isolation: the broadcast config carries no wallet key", () => {
   assert.equal("walletKey" in bc, false); // the speaking path is never handed the signing key
   assert.equal(bc.apiKey, OT_KEY);
   assert.ok(bc.secrets.includes(OT_KEY)); // the ot_ key is itself a guarded secret
+  assert.equal(bc.minGapMinutes, 20); // the backstop takes the shorter of the two gaps
   assert.equal(contentGate("a calm thought", bc).ok, true);
 });
 

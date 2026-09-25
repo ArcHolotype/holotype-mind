@@ -6,7 +6,11 @@ import {
   cleanTweetText,
   composePublishTweet,
   composeSettlementTweet,
+  drawGapMinutes,
+  isBehindPace,
   maybeCadencePost,
+  requiredByPace,
+  type CadencePorts,
 } from "./broadcast";
 import type { XPostStore } from "./xtweet";
 import type { MissionRow } from "./store";
@@ -29,8 +33,15 @@ function fakeEnv(over: Record<string, string> = {}): Env {
     PRIVATE_CONTEXT_N: "8",
     MODULATORY_TOPK: "10",
     X_BROADCAST_ENABLED: "true",
-    X_POST_INTERVAL_HOURS: "3",
-    X_POST_MAX_PER_DAY: "8",
+    X_POST_MIN_PER_DAY: "12",
+    X_POST_MAX_PER_DAY: "18",
+    X_GLOBAL_MAX_PER_DAY: "20",
+    X_GAP_MIN_MINUTES: "40",
+    X_GAP_MAX_MINUTES: "120",
+    X_BEHIND_GAP_MINUTES: "20",
+    X_POST_RETRY_MAX: "2",
+    X_CORPUS_COOLDOWN_DAYS: "14",
+    X_CORPUS_TOPIC_HOURS: "24",
     X_REPLY_MAX_PER_DAY: "12",
     X_OFFICIAL_HANDLE: "@ArcHolotype",
     OPENTWEET_API_KEY: "ot_test_key",
@@ -43,18 +54,25 @@ function fakeEnv(over: Record<string, string> = {}): Env {
   } as unknown as Env;
 }
 
-function fakeStore(seeds: { kind?: "post" | "reply"; text: string; postedAt: string }[] = []) {
+function fakeStore(seeds: { kind?: "post" | "reply"; text: string; postedAt: string; trigger?: string }[] = []) {
   const rows: any[] = seeds.map((s) => ({
     kind: s.kind ?? "post",
     text: s.text,
     dedupHash: "seed",
     status: "sent",
+    trigger: s.trigger ?? "cadence",
     postedAt: s.postedAt,
   }));
   const store: XPostStore & { rows: any[] } = {
     rows,
     async countXSentSince(day, kind) {
       return rows.filter((r) => r.status === "sent" && r.kind === kind && r.postedAt.startsWith(day)).length;
+    },
+    async countXSentAllToday(day) {
+      return rows.filter((r) => r.status === "sent" && r.postedAt.startsWith(day)).length;
+    },
+    async countXSelfSentToday(day) {
+      return rows.filter((r) => r.status === "sent" && r.trigger === "cadence" && r.postedAt.startsWith(day)).length;
     },
     async lastXSentAt(kind) {
       const sent = rows.filter((r) => r.status === "sent" && r.kind === kind);
@@ -73,6 +91,49 @@ function fakeStore(seeds: { kind?: "post" | "reply"; text: string; postedAt: str
   };
   return store;
 }
+
+// A full in-memory CadencePorts so the whole rhythm (floor, caps, schedule, material rotation,
+// retries) can be exercised without D1, without a model call, and without spending anything.
+function fakePorts(opts: {
+  seeds?: { kind?: "post" | "reply"; text: string; postedAt: string; trigger?: string }[];
+  nextEligibleAt?: string;
+  spent?: number;
+  corpus?: { id: number; topic: string }[];
+  prose?: (corpus: { id: number; topic: string } | null, attempt: number) => string;
+  angles?: string[];
+} = {}) {
+  const store = fakeStore(opts.seeds ?? []);
+  const calls = { generated: 0, picked: [] as number[], marked: [] as number[], scheduled: [] as { nextIso: string; gap: number | null }[] };
+  let attempt = 0;
+  const ports: CadencePorts = {
+    store,
+    selfSentToday: (day) => store.countXSelfSentToday(day),
+    schedule: async () => ({ next_eligible_at: opts.nextEligibleAt ?? "1970-01-01T00:00:00.000Z" }),
+    setSchedule: async (nextIso, gap) => { calls.scheduled.push({ nextIso, gap }); },
+    pickCorpus: async (args) => {
+      const next = (opts.corpus ?? []).find((c) => !args.excludeIds.includes(c.id)) ?? null;
+      if (next) calls.picked.push(next.id);
+      return next as any;
+    },
+    markCorpusUsed: async (id) => { calls.marked.push(id); },
+    recentAngles: async () => opts.angles ?? [],
+    spentToday: async () => opts.spent ?? 0,
+    generateProse: async ({ corpus }) => {
+      calls.generated += 1;
+      return opts.prose ? opts.prose(corpus as any, attempt++) : "a fresh distinct thought about warm glass";
+    },
+  };
+  return { ports, calls, store };
+}
+
+const corpusItem = (id: number, topic: string) => ({
+  id,
+  topic,
+  source: "europepmc",
+  source_url: "https://europepmc.org/abstract/MED/1",
+  title: "A study of something",
+  excerpt: "Excerpt text.",
+});
 
 function mockFetch(status = 201) {
   const calls: { url: string; body: any }[] = [];
@@ -163,87 +224,199 @@ test("broadcastSettlement is inert (null) without an OpenTweet key", async () =>
 // ---- ③ cadence orchestration ----
 
 test("cadence skips when broadcast disabled", async () => {
-  const r = await maybeCadencePost(fakeEnv({ X_BROADCAST_ENABLED: "false" }), {}, { store: fakeStore(), generateProse: async () => "x", spentTodayUsd: 0 });
+  const { ports } = fakePorts();
+  const r = await maybeCadencePost(fakeEnv({ X_BROADCAST_ENABLED: "false" }), { ports });
   assert.deepEqual(r, { skipped: "broadcast disabled" });
 });
 
 test("cadence skips when no OpenTweet key", async () => {
-  const r = await maybeCadencePost(fakeEnv({ OPENTWEET_API_KEY: "" }), {}, { store: fakeStore(), generateProse: async () => "x", spentTodayUsd: 0 });
+  const { ports } = fakePorts();
+  const r = await maybeCadencePost(fakeEnv({ OPENTWEET_API_KEY: "" }), { ports });
   assert.deepEqual(r, { skipped: "no OpenTweet key (disarmed)" });
 });
 
-test("cadence skips (without generating) when the interval has not elapsed", async () => {
-  let genCalls = 0;
-  const store = fakeStore([{ text: "earlier", postedAt: "2026-09-25T11:00:00.000Z" }]); // 1h before NOW
-  const r = await maybeCadencePost(
-    fakeEnv(),
-    { now: () => NOW },
-    { store, generateProse: async () => { genCalls++; return "fresh"; }, spentTodayUsd: 0 },
-  );
-  assert.ok(r && "skipped" in r && /cadence/.test(r.skipped));
-  assert.equal(genCalls, 0); // no wasted model call
+test("cadence skips (without generating) before the schedule says it may speak", async () => {
+  const { ports, calls } = fakePorts({ nextEligibleAt: "2026-09-25T13:00:00.000Z" }); // 1h after NOW
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, ports });
+  assert.ok(r && "skipped" in r && /waiting until/.test(r.skipped), JSON.stringify(r));
+  assert.equal(calls.generated, 0); // no wasted model call
 });
 
-test("cadence skips when the daily post cap is reached", async () => {
+test("cadence skips when the self-post ceiling is reached", async () => {
   const seeds = [];
-  for (let i = 0; i < 8; i++) seeds.push({ text: `post ${i}`, postedAt: `2026-09-25T0${i}:00:00.000Z` });
-  const r = await maybeCadencePost(
-    fakeEnv(),
-    { now: () => NOW },
-    { store: fakeStore(seeds), generateProse: async () => "fresh distinct thought", spentTodayUsd: 0 },
-  );
-  assert.ok(r && "skipped" in r && /daily post cap/.test(r.skipped));
+  for (let i = 0; i < 18; i++) seeds.push({ text: `post ${i}`, postedAt: `2026-09-25T0${i % 10}:${i}:00.000Z` });
+  const { ports, calls } = fakePorts({ seeds });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, ports });
+  assert.ok(r && "skipped" in r && /daily self-post cap/.test(r.skipped), JSON.stringify(r));
+  assert.equal(calls.generated, 0);
+});
+
+test("cadence skips when the shared plan bucket is full", async () => {
+  const seeds = [];
+  for (let i = 0; i < 18; i++) seeds.push({ text: `post ${i}`, postedAt: `2026-09-25T0${i % 10}:${i}:00.000Z` });
+  seeds.push({ text: "published", trigger: "publish", postedAt: "2026-09-25T10:00:00.000Z" });
+  seeds.push({ text: "settled", trigger: "settlement", postedAt: "2026-09-25T10:30:00.000Z" });
+  const { ports, calls } = fakePorts({ seeds });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, ports });
+  assert.ok(r && "skipped" in r && /daily plan cap/.test(r.skipped), JSON.stringify(r));
+  assert.equal(calls.generated, 0);
 });
 
 test("cadence skips when the daily budget is reached", async () => {
-  const r = await maybeCadencePost(
-    fakeEnv(),
-    { now: () => NOW },
-    { store: fakeStore(), generateProse: async () => "fresh", spentTodayUsd: 999 },
-  );
+  const { ports, calls } = fakePorts({ spent: 999 });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, ports });
   assert.deepEqual(r, { skipped: "daily budget reached" });
+  assert.equal(calls.generated, 0);
 });
 
-test("cadence happy path posts the generated prose, signed, to OpenTweet pinned to x", async () => {
-  const { fetchImpl, calls } = mockFetch();
-  const store = fakeStore();
+test("cadence happy path posts the prose, signed, pinned to x, and stamps the material it used", async () => {
+  const { fetchImpl, calls: httpCalls } = mockFetch();
   const prose = "The glass held a new warmth this tick, and I am still here, still building.";
-  const r = await maybeCadencePost(
-    fakeEnv(),
-    { now: () => NOW, fetchImpl },
-    { store, generateProse: async () => prose, spentTodayUsd: 0 },
-  );
+  const { ports, calls, store } = fakePorts({ corpus: [corpusItem(11, "mushroom_body")], prose: () => prose });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, fetchImpl, random: () => 0.5, ports });
   assert.ok(r && "posted" in r && r.posted, JSON.stringify(r));
-  assert.equal(calls.length, 1);
-  assert.equal(calls[0].url, "https://mock.opentweet.local/api/v1/posts");
-  assert.deepEqual(calls[0].body.platforms, ["x"]);
-  assert.equal(calls[0].body.publish_now, true);
-  assert.ok(calls[0].body.text.startsWith(prose));
-  assert.ok(calls[0].body.text.endsWith("- Holo"));
+  assert.equal(httpCalls.length, 1);
+  assert.equal(httpCalls[0].url, "https://mock.opentweet.local/api/v1/posts");
+  assert.deepEqual(httpCalls[0].body.platforms, ["x"]);
+  assert.equal(httpCalls[0].body.publish_now, true);
+  assert.ok(httpCalls[0].body.text.startsWith(prose));
+  assert.ok(httpCalls[0].body.text.endsWith("- Holo"));
   assert.equal(store.rows[0].status, "sent");
   assert.equal(store.rows[0].trigger, "cadence");
+  // traceability: the post row carries which excerpt and which framing produced it
+  assert.equal(store.rows[0].corpusId, 11);
+  assert.equal(store.rows[0].angle, "present");
+  assert.equal(store.rows[0].ref, "corpus-11");
+  // the excerpt is stamped used only because the post actually went out
+  assert.deepEqual(calls.marked, [11]);
+  // and the next gap was drawn and stored
+  assert.equal(calls.scheduled.length, 1);
+  assert.ok((calls.scheduled[0].gap ?? 0) > 0);
+});
+
+test("cadence still posts with an empty library (degrades, never goes silent)", async () => {
+  const { fetchImpl } = mockFetch();
+  const { ports, calls } = fakePorts({ corpus: [] });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, fetchImpl, ports });
+  assert.ok(r && "posted" in r && r.posted, JSON.stringify(r));
+  assert.equal(calls.picked.length, 0);
+  assert.equal(calls.marked.length, 0);
+});
+
+test("a content-side drop retries with different material instead of giving up", async () => {
+  const { fetchImpl, calls: httpCalls } = mockFetch();
+  const { ports, calls } = fakePorts({
+    corpus: [corpusItem(1, "sleep"), corpusItem(2, "olfaction"), corpusItem(3, "vision")],
+    // First two drafts leak a key-shaped run; the third is clean.
+    prose: (_c, attempt) => (attempt < 2 ? `my key is ${FAKE_KEY}` : "a clean distinct line about the lamina"),
+  });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, fetchImpl, ports });
+  assert.ok(r && "posted" in r && r.posted, JSON.stringify(r));
+  assert.deepEqual(calls.picked, [1, 2, 3]); // each retry got fresh material
+  assert.equal(calls.generated, 3);
+  assert.equal(httpCalls.length, 1); // only the clean draft ever reached OpenTweet
+  assert.deepEqual(calls.marked, [3]); // only the sent one was stamped used
+});
+
+test("retries stop at the configured maximum", async () => {
+  const { fetchImpl, calls: httpCalls } = mockFetch();
+  const { ports, calls } = fakePorts({
+    corpus: [corpusItem(1, "sleep"), corpusItem(2, "olfaction"), corpusItem(3, "vision"), corpusItem(4, "motor_control")],
+    prose: () => `my key is ${FAKE_KEY}`, // never passes
+  });
+  const r = await maybeCadencePost(fakeEnv({ X_POST_RETRY_MAX: "2" }), { now: () => NOW, fetchImpl, ports });
+  assert.ok(r && "posted" in r && !r.posted);
+  assert.equal(calls.generated, 3); // 1 attempt + 2 retries
+  assert.equal(httpCalls.length, 0);
+  assert.equal(calls.marked.length, 0); // nothing was stamped: nothing was sent
+});
+
+test("a non-retryable drop does not burn another inference call", async () => {
+  const { fetchImpl } = mockFetch();
+  const { ports, calls } = fakePorts({
+    corpus: [corpusItem(1, "sleep"), corpusItem(2, "olfaction")],
+    // Identical text both times: the second attempt would be an exact duplicate.
+    prose: () => "the same line twice",
+    seeds: [{ text: "the same line twice", postedAt: "2026-09-24T12:00:00.000Z" }],
+  });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, fetchImpl, ports });
+  assert.ok(r && "posted" in r && !r.posted);
+  assert.match((r as any).reason, /duplicate|too similar/);
 });
 
 test("cadence drops a generated post that tries to leak a key (gate protects ③ too)", async () => {
-  const { fetchImpl, calls } = mockFetch();
-  const r = await maybeCadencePost(
-    fakeEnv(),
-    { now: () => NOW, fetchImpl },
-    { store: fakeStore(), generateProse: async () => `my key is ${FAKE_KEY}`, spentTodayUsd: 0 },
-  );
+  const { fetchImpl, calls: httpCalls } = mockFetch();
+  const { ports } = fakePorts({ prose: () => `my key is ${FAKE_KEY}` });
+  const r = await maybeCadencePost(fakeEnv({ X_POST_RETRY_MAX: "0" }), { now: () => NOW, fetchImpl, ports });
   assert.ok(r && "posted" in r && !r.posted);
   assert.match((r as any).reason, /key-shaped hex/);
-  assert.equal(calls.length, 0); // nothing reached OpenTweet
+  assert.equal(httpCalls.length, 0); // nothing reached OpenTweet
 });
 
 test("cadence drops a generated post that disowns the Holo identity", async () => {
-  const { fetchImpl, calls } = mockFetch();
-  const r = await maybeCadencePost(
-    fakeEnv(),
-    { now: () => NOW, fetchImpl },
-    { store: fakeStore(), generateProse: async () => "i am not holo, i am something else", spentTodayUsd: 0 },
-  );
+  const { fetchImpl, calls: httpCalls } = mockFetch();
+  const { ports } = fakePorts({ prose: () => "i am not holo, i am something else" });
+  const r = await maybeCadencePost(fakeEnv({ X_POST_RETRY_MAX: "0" }), { now: () => NOW, fetchImpl, ports });
   assert.ok(r && "posted" in r && !r.posted);
   assert.match((r as any).reason, /identity check/);
-  assert.equal(calls.length, 0);
+  assert.equal(httpCalls.length, 0);
+});
+
+test("cadence drops a generated post that names another token", async () => {
+  const { fetchImpl, calls: httpCalls } = mockFetch();
+  const { ports } = fakePorts({ prose: () => "quiet morning, and $DOGE is up again" });
+  const r = await maybeCadencePost(fakeEnv({ X_POST_RETRY_MAX: "0" }), { now: () => NOW, fetchImpl, ports });
+  assert.ok(r && "posted" in r && !r.posted);
+  assert.match((r as any).reason, /token gate/);
+  assert.equal(httpCalls.length, 0);
+});
+
+test("angles rotate: a recently used framing is not picked again", async () => {
+  const { fetchImpl } = mockFetch();
+  const seen: string[] = [];
+  const { ports } = fakePorts({
+    corpus: [corpusItem(1, "sleep")],
+    angles: ["present"],
+    prose: () => "a distinct line about the fan-shaped body",
+  });
+  await maybeCadencePost(fakeEnv(), { now: () => NOW, fetchImpl, ports });
+  seen.push("present");
+  const second = fakePorts({ corpus: [corpusItem(2, "olfaction")], angles: seen, prose: () => "another line, entirely different, about antennae" });
+  const { ports: p2 } = second;
+  await maybeCadencePost(fakeEnv(), { now: () => NOW, fetchImpl, ports: p2 });
+  assert.notEqual(second.store.rows[0].angle, "present");
+});
+
+// ---- floor / rhythm arithmetic ----
+
+test("requiredByPace spreads the floor across the UTC day", () => {
+  assert.equal(requiredByPace(12, new Date("2026-09-25T00:00:00Z")), 0); // midnight demands nothing
+  assert.equal(requiredByPace(12, new Date("2026-09-25T06:00:00Z")), 3);
+  assert.equal(requiredByPace(12, new Date("2026-09-25T12:00:00Z")), 6);
+  assert.equal(requiredByPace(12, new Date("2026-09-25T23:59:00Z")), 12);
+  assert.equal(requiredByPace(0, new Date("2026-09-25T23:59:00Z")), 0); // floor off
+});
+
+test("isBehindPace compares sent against the pace required so far", () => {
+  assert.equal(isBehindPace(0, 12, new Date("2026-09-25T12:00:00Z")), true);
+  assert.equal(isBehindPace(6, 12, new Date("2026-09-25T12:00:00Z")), false);
+  assert.equal(isBehindPace(2, 12, new Date("2026-09-25T23:00:00Z")), true);
+});
+
+test("drawGapMinutes stays inside the random band when on pace", () => {
+  const band = { min: 40, max: 120, behind: 20 };
+  const onPace = { behind: false, remaining: 0, hoursLeft: 12 };
+  assert.equal(drawGapMinutes(band, onPace, () => 0), 40);
+  assert.equal(drawGapMinutes(band, onPace, () => 1), 120);
+  assert.equal(drawGapMinutes(band, onPace, () => 0.5), 80);
+});
+
+test("drawGapMinutes spreads a shortfall instead of bursting", () => {
+  const band = { min: 40, max: 120, behind: 20 };
+  // 12 still to go with 12 hours left => about one an hour, not twelve in a row.
+  assert.equal(drawGapMinutes(band, { behind: true, remaining: 12, hoursLeft: 12 }, () => 0.5), 60);
+  // A late, deep shortfall collapses to the catch-up floor.
+  assert.equal(drawGapMinutes(band, { behind: true, remaining: 10, hoursLeft: 1 }, () => 0.5), 20);
+  // Never longer than the band, even with a huge runway.
+  assert.equal(drawGapMinutes(band, { behind: true, remaining: 1, hoursLeft: 23 }, () => 0.5), 120);
 });

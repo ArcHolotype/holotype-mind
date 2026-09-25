@@ -34,8 +34,18 @@ export interface Env {
   // X (Twitter) self-broadcast rail — Holo runs its own account via OpenTweet. Disarmed by
   // default: with X_BROADCAST_ENABLED != "true" OR no OPENTWEET_API_KEY, nothing is posted.
   X_BROADCAST_ENABLED?: string; // "true" | "false" — broadcast kill switch (default false)
-  X_POST_INTERVAL_HOURS?: string; // min hours between two self-posts (default 3)
-  X_POST_MAX_PER_DAY?: string; // hard cap on self-posts per UTC day (default 8)
+  X_POST_MIN_PER_DAY?: string; // floor: self-posts the rail must reach per UTC day (default 12)
+  X_POST_MAX_PER_DAY?: string; // ceiling on self-posts per UTC day (default 18)
+  X_GLOBAL_MAX_PER_DAY?: string; // ceiling on ALL kinds per UTC day (default 20 = the plan limit)
+  X_GAP_MIN_MINUTES?: string; // shortest random gap between two self-posts (default 40)
+  X_GAP_MAX_MINUTES?: string; // longest random gap between two self-posts (default 120)
+  X_BEHIND_GAP_MINUTES?: string; // gap used when the day is behind pace (default 20)
+  X_POST_RETRY_MAX?: string; // extra attempts when a draft is dropped (default 2)
+  X_CORPUS_TARGET?: string; // corpus size the ingest cron fills to (default 600)
+  X_CORPUS_PER_TOPIC?: string; // per-topic corpus size ingest aims for (default 24)
+  X_CORPUS_COOLDOWN_DAYS?: string; // days before an excerpt may be reused (default 14)
+  X_CORPUS_TOPIC_HOURS?: string; // hours before a topic may be used again (default 24)
+  X_CORPUS_TOPICS_PER_RUN?: string; // topics fetched per ingest run (default 2; worst case 16 subrequests)
   X_REPLY_MAX_PER_DAY?: string; // hard cap on replies per UTC day (default 12)
   X_OFFICIAL_HANDLE?: string; // the account Holo runs / may read (default @ArcHolotype)
   TOKEN_CA?: string; // public token contract address, allowed in public text alongside the wallet
@@ -84,8 +94,18 @@ export interface RuntimeConfig {
   x402MaxPerDay: number;
   x402MaxTimeoutSeconds: number;
   xBroadcastEnabled: boolean;
-  xPostIntervalHours: number;
+  xPostMinPerDay: number;
   xPostMaxPerDay: number;
+  xGlobalMaxPerDay: number;
+  xGapMinMinutes: number;
+  xGapMaxMinutes: number;
+  xBehindGapMinutes: number;
+  xPostRetryMax: number;
+  xCorpusTarget: number;
+  xCorpusPerTopic: number;
+  xCorpusCooldownDays: number;
+  xCorpusTopicHours: number;
+  xCorpusTopicsPerRun: number;
   xReplyMaxPerDay: number;
   xOfficialHandle: string;
   tokenCa: string;
@@ -116,8 +136,18 @@ export function readConfig(env: Env): RuntimeConfig {
     x402MaxPerDay: Math.max(1, Math.floor(asNum(env.X402_MAX_PER_DAY, 5))),
     x402MaxTimeoutSeconds: Math.max(1, Math.floor(asNum(env.X402_MAX_TIMEOUT_SECONDS, 300))),
     xBroadcastEnabled: asBool(env.X_BROADCAST_ENABLED, false),
-    xPostIntervalHours: Math.max(1, asNum(env.X_POST_INTERVAL_HOURS, 3)),
-    xPostMaxPerDay: Math.max(1, Math.floor(asNum(env.X_POST_MAX_PER_DAY, 8))),
+    xPostMinPerDay: Math.max(0, Math.floor(asNum(env.X_POST_MIN_PER_DAY, 12))),
+    xPostMaxPerDay: Math.max(1, Math.floor(asNum(env.X_POST_MAX_PER_DAY, 18))),
+    xGlobalMaxPerDay: Math.max(1, Math.floor(asNum(env.X_GLOBAL_MAX_PER_DAY, 20))),
+    xGapMinMinutes: Math.max(1, Math.floor(asNum(env.X_GAP_MIN_MINUTES, 40))),
+    xGapMaxMinutes: Math.max(1, Math.floor(asNum(env.X_GAP_MAX_MINUTES, 120))),
+    xBehindGapMinutes: Math.max(1, Math.floor(asNum(env.X_BEHIND_GAP_MINUTES, 20))),
+    xPostRetryMax: Math.max(0, Math.floor(asNum(env.X_POST_RETRY_MAX, 2))),
+    xCorpusTarget: Math.max(1, Math.floor(asNum(env.X_CORPUS_TARGET, 600))),
+    xCorpusPerTopic: Math.max(1, Math.floor(asNum(env.X_CORPUS_PER_TOPIC, 24))),
+    xCorpusCooldownDays: Math.max(0, asNum(env.X_CORPUS_COOLDOWN_DAYS, 14)),
+    xCorpusTopicHours: Math.max(0, asNum(env.X_CORPUS_TOPIC_HOURS, 24)),
+    xCorpusTopicsPerRun: Math.max(1, Math.floor(asNum(env.X_CORPUS_TOPICS_PER_RUN, 2))),
     xReplyMaxPerDay: Math.max(0, Math.floor(asNum(env.X_REPLY_MAX_PER_DAY, 12))),
     xOfficialHandle: (env.X_OFFICIAL_HANDLE ?? "@ArcHolotype").trim(),
     tokenCa: (env.TOKEN_CA ?? "0xECa7C682fbb32EC4F1B3bBb28791Fe184D3552A8").trim().toLowerCase(),
