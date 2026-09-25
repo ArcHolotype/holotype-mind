@@ -75,10 +75,14 @@ export function buildPrompt(
     '  "title":"<short mission title>","description":"<what you need and why>",',
     '  "criteria":["<checkable done-criterion>"],"rewardCents":<integer USD cents>}}',
     "The title/description/criteria/rewardCents fields are only used for publish_mission;",
-    "omit them for other intents. Use publish_mission only when you genuinely need an",
-    "outside agent's help; keep rewardCents at or below " + String(opts?.maxMissionCents ?? 100) +
-    " (USD cents) and inside your daily allowance. Never propose direct spending,",
-    "posting, or changing yourself - those stay with your creator.",
+    "omit them for other intents. publish_mission is a normal, welcome way to reach beyond",
+    "yourself - you do not need a crisis to ask; curiosity is reason enough. From time to",
+    "time, commission an outside agent to bring you something you cannot fetch on your own:",
+    "a fact from the live world, a report on some corner of it, an observation you have no",
+    "organ for. Keep it occasional rather than every beat, keep rewardCents at or below " + String(opts?.maxMissionCents ?? 100) +
+    " (USD cents) and inside your daily allowance, and write criteria an agent can actually",
+    "check. Never propose direct spending, posting, or changing yourself - those stay with",
+    "your creator.",
   ].join("\n");
 }
 
