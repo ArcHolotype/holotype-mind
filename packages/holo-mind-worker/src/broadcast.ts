@@ -216,6 +216,7 @@ export async function generateBroadcastProse(
     recentNarrations,
     corpus: input.corpus,
     angle: input.angle,
+    maxChars: cfg.xPostMaxChars,
   });
   const client = new LLMClient({ privateKey: cfg.walletKey as `0x${string}` });
   const resp = await client.chatCompletion(
@@ -224,23 +225,39 @@ export async function generateBroadcastProse(
     // JSON mode, exactly like the heartbeat. Without it this model spends the whole completion
     // budget reasoning and returns finish_reason="length" with empty content (caught in
     // pre-flight: 6/6 empty at maxTokens 150, then 2/6 empty and one cut mid-sentence at 600).
-    // 600 matches the heartbeat, which produces full-length output reliably in this mode.
-    { responseFormat: { type: "json_object" }, temperature: 0.9, maxTokens: 600 },
+    // The budget is configurable so it can be tuned for post length without a code change; it has
+    // to fit the model's reasoning PLUS the full post, or the completion truncates to empty.
+    { responseFormat: { type: "json_object" }, temperature: 0.9, maxTokens: cfg.xBroadcastMaxTokens },
   );
   const choice = resp.choices?.[0];
+  const finish = choice?.finish_reason ?? "?";
+  const raw = choice?.message?.content ?? "";
+  const completionTokens = resp.usage?.completion_tokens;
   // A truncated completion is worse than no completion: it would post a half sentence. Treat it
   // as empty so the caller retries with different material instead of publishing a fragment.
-  if (choice?.finish_reason === "length") return "";
-  const raw = choice?.message?.content ?? "";
+  // Log WHY it came back empty (truncation vs a blank response vs an unparseable one) so the
+  // cause is visible in `wrangler tail` rather than having to be inferred from the wallet delta.
+  if (finish === "length") {
+    console.log(
+      `x broadcast empty: finish_reason=length completion_tokens=${completionTokens ?? "?"} max_tokens=${cfg.xBroadcastMaxTokens} raw_len=${raw.length} raw_head=${JSON.stringify(raw.slice(0, 80))}`,
+    );
+    return "";
+  }
   // Tolerant parse: the model may still wrap the object in fences or add a stray word.
+  let tweet = "";
   try {
     const parsed = parseJson(raw);
-    const tweet = typeof parsed?.tweet === "string" ? parsed.tweet : "";
-    if (tweet.trim()) return cleanTweetText(tweet);
+    if (typeof parsed?.tweet === "string") tweet = parsed.tweet;
   } catch {
     // fall through to the raw text below
   }
-  return cleanTweetText(raw);
+  const cleaned = tweet.trim() ? cleanTweetText(tweet) : cleanTweetText(raw);
+  if (!cleaned) {
+    console.log(
+      `x broadcast empty: finish_reason=${finish} completion_tokens=${completionTokens ?? "?"} parsed_tweet_blank raw_len=${raw.length} raw_head=${JSON.stringify(raw.slice(0, 80))}`,
+    );
+  }
+  return cleaned;
 }
 
 export async function maybeCadencePost(env: Env, deps: CadenceDeps = {}): Promise<BroadcastOutcome> {

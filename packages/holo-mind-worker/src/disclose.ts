@@ -95,11 +95,12 @@ export function discloseGate(
   publicWallet?: string,
   secrets?: readonly string[],
   alsoAllow?: readonly string[],
+  maxChars: number = MAX_PUBLIC_CHARS,
 ): DisclosureVerdict {
   if (typeof text !== "string") return { ok: false, reason: "not a string" };
   const value = text;
   if (value.trim() === "") return { ok: false, reason: "empty" };
-  if (value.length > MAX_PUBLIC_CHARS) return { ok: false, reason: "over length bound" };
+  if (value.length > maxChars) return { ok: false, reason: "over length bound" };
   if (NON_ASCII.test(value)) return { ok: false, reason: "outside ascii set" };
   if (URL_PATTERN.test(value)) return { ok: false, reason: "link structure" };
   if (KEY_SHAPED_HEX.test(value)) return { ok: false, reason: "key-shaped hex run" };

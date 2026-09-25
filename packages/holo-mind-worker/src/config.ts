@@ -48,6 +48,8 @@ export interface Env {
   X_CORPUS_TOPIC_HOURS?: string; // hours before a topic may be used again (default 24)
   X_CORPUS_TOPICS_PER_RUN?: string; // topics fetched per ingest run (default 2; worst case 16 subrequests)
   X_REPLY_MAX_PER_DAY?: string; // hard cap on replies per UTC day (default 12)
+  X_POST_MAX_CHARS?: string; // character bound for one self-post (default 1500; the account is verified, so long-form is allowed)
+  X_BROADCAST_MAX_TOKENS?: string; // completion budget for one self-post generation (default 3000; must fit the model's reasoning plus the post)
   X_OFFICIAL_HANDLE?: string; // the account Holo runs / may read (default @ArcHolotype)
   TOKEN_CA?: string; // public token contract address, allowed in public text alongside the wallet
   OPENTWEET_BASE_URL?: string; // OpenTweet base url (default https://opentweet.io); overridable for a local dry-run mock
@@ -109,6 +111,8 @@ export interface RuntimeConfig {
   xCorpusTopicHours: number;
   xCorpusTopicsPerRun: number;
   xReplyMaxPerDay: number;
+  xPostMaxChars: number;
+  xBroadcastMaxTokens: number;
   xOfficialHandle: string;
   tokenCa: string;
   openTweetBaseUrl: string;
@@ -152,6 +156,8 @@ export function readConfig(env: Env): RuntimeConfig {
     xCorpusTopicHours: Math.max(0, asNum(env.X_CORPUS_TOPIC_HOURS, 24)),
     xCorpusTopicsPerRun: Math.max(1, Math.floor(asNum(env.X_CORPUS_TOPICS_PER_RUN, 2))),
     xReplyMaxPerDay: Math.max(0, Math.floor(asNum(env.X_REPLY_MAX_PER_DAY, 12))),
+    xPostMaxChars: Math.max(1, Math.floor(asNum(env.X_POST_MAX_CHARS, 1500))),
+    xBroadcastMaxTokens: Math.max(1, Math.floor(asNum(env.X_BROADCAST_MAX_TOKENS, 3000))),
     xOfficialHandle: (env.X_OFFICIAL_HANDLE ?? "@ArcHolotype").trim(),
     tokenCa: (env.TOKEN_CA ?? "0xECa7C682fbb32EC4F1B3bBb28791Fe184D3552A8").trim().toLowerCase(),
     openTweetBaseUrl: (env.OPENTWEET_BASE_URL ?? "https://opentweet.io").trim(),

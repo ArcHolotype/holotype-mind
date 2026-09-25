@@ -22,7 +22,7 @@
 //   5. token gate   — model-authored prose may not carry a cashtag, a trading pair, or the
 //                     name/ticker of any token but its own.
 //   6. final scan   — the composed text (prose + trusted suffix) is re-scanned for literal
-//                     secret values and the 280-char bound before it leaves.
+//                     secret values and the configured character bound before it leaves.
 //
 // The tx hash / links / amounts in event broadcasts are NOT model output: the caller builds
 // them as a `suffix` from trusted constants and verified DB/chain data and they are appended
@@ -49,7 +49,7 @@ export function broadcastConfig(cfg: RuntimeConfig, baseUrl = cfg.openTweetBaseU
     postMaxPerDay: cfg.xPostMaxPerDay,
     globalMaxPerDay: cfg.xGlobalMaxPerDay,
     replyMaxPerDay: cfg.xReplyMaxPerDay,
-    maxChars: 280,
+    maxChars: cfg.xPostMaxChars,
     publicWallet: cfg.publicWallet,
     tokenCa: cfg.tokenCa,
     secrets: secretValues(cfg),
@@ -66,7 +66,7 @@ export interface XBroadcastConfig {
   postMaxPerDay: number; // ceiling on self-posts per UTC day
   globalMaxPerDay: number; // ceiling on ALL kinds per UTC day (the plan's single bucket)
   replyMaxPerDay: number;
-  maxChars: number; // X character bound for the composed text (default 280)
+  maxChars: number; // X character bound for the composed text (configurable; the account is verified, so long-form is allowed)
   publicWallet: string; // allowed address in prose
   tokenCa: string; // additional allowed public address (token contract)
   secrets: readonly string[]; // literal secret values that must never appear (incl. the ot_ key)
@@ -172,7 +172,9 @@ function stripSignature(text: string, signature: string): string {
 
 // Pure content gate on the model-generated PROSE only (no links / no hashes expected here).
 export function contentGate(prose: string, cfg: XBroadcastConfig): { ok: boolean; reason: string } {
-  const verdict = discloseGate(prose, cfg.publicWallet, cfg.secrets, [cfg.tokenCa]);
+  // The prose is bounded by this rail's own character cap, not the heartbeat's public-narration
+  // bound: a verified account may post long-form, so the two limits are deliberately decoupled.
+  const verdict = discloseGate(prose, cfg.publicWallet, cfg.secrets, [cfg.tokenCa], cfg.maxChars);
   if (!verdict.ok) return verdict;
   const lowered = prose.toLowerCase();
   for (const phrase of IDENTITY_DENIAL) {

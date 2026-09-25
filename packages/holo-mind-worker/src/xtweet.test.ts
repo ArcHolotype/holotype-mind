@@ -361,12 +361,38 @@ test("signature: every post is signed '- Holo' by code", async () => {
   assert.ok(body.text.endsWith("- Holo"), `expected signature, got: ${body.text}`);
 });
 
-test("final scan drops a composed text over the character bound", async () => {
+test("content gate drops prose already over the character bound", async () => {
   const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
-  const prose = "word ".repeat(80).trim(); // ~399 chars, under the 1200 disclose bound but over 280
+  const prose = "word ".repeat(80).trim(); // ~399 chars, over the 280 bound
+  const r = await postTweet(cfg(), fakeStore(), { prose }, { fetchImpl, now });
+  assert.equal(r.posted, false);
+  assert.match(r.reason, /over length bound/);
+  assert.equal(calls.length, 0);
+});
+
+test("final scan drops a composed text the appended signature pushes over the bound", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  const prose = "word ".repeat(56).trim(); // ~279 chars: clears the content gate, +signature exceeds 280
   const r = await postTweet(cfg(), fakeStore(), { prose }, { fetchImpl, now });
   assert.equal(r.posted, false);
   assert.match(r.reason, /over 280 chars/);
+  assert.equal(calls.length, 0);
+});
+
+test("long-form: a verified-account post up to the configured bound passes every gate", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  const prose = "word ".repeat(280).trim(); // ~1399 chars: over the old 280 cap, under a 1500 bound
+  const r = await postTweet(cfg({ maxChars: 1500 }), fakeStore(), { prose }, { fetchImpl, now });
+  assert.equal(r.posted, true);
+  assert.equal(calls.length, 1);
+});
+
+test("long-form bound is still fail-closed at the final scan", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  const prose = "word ".repeat(300).trim(); // ~1499 chars: clears the content gate, +signature exceeds 1500
+  const r = await postTweet(cfg({ maxChars: 1500 }), fakeStore(), { prose }, { fetchImpl, now });
+  assert.equal(r.posted, false);
+  assert.match(r.reason, /over 1500 chars/);
   assert.equal(calls.length, 0);
 });
 

@@ -55,6 +55,14 @@ test("shape bounds drop", () => {
   assert.equal(discloseGate("x".repeat(1200)).ok, true);
 });
 
+test("length bound is configurable, so long-form posts do not move the narration cap", () => {
+  // The default bound is unchanged: the heartbeat's public narration is still capped at 1200.
+  assert.equal(discloseGate("x".repeat(1201)).ok, false);
+  // A caller (the X rail, on a verified account) may raise it for its own text only.
+  assert.equal(discloseGate("x".repeat(1500), undefined, undefined, undefined, 1500).ok, true);
+  assert.equal(discloseGate("x".repeat(1501), undefined, undefined, undefined, 1500).ok, false);
+});
+
 test("selectDisclosable keeps order and drops only failing rows", () => {
   const rows = [
     { narration: "A calm tick." },

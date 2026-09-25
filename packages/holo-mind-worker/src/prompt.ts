@@ -114,6 +114,7 @@ export interface BroadcastContext {
   recentNarrations: string[]; // its private inner monologue — raw material, not to be copied verbatim
   corpus?: { topic: string; title: string; excerpt: string; source: string } | null; // what it is reading
   angle?: { key: string; instruction: string } | null; // the framing the rail chose for this post
+  maxChars?: number; // the rail's character bound for one post (a verified account allows long-form)
 }
 
 // Fixed, factual, and deliberately free of commitments — see the no-roadmap stance: upcoming
@@ -206,7 +207,9 @@ export function buildBroadcastPrompt(c: BroadcastContext): string {
     "",
     "STYLE / FORMAT RULES:",
     "- English only. Plain printable ASCII: no emoji, no smart quotes, no non-ASCII characters.",
-    "- At most 240 characters. A single tweet, not a thread.",
+    `- One post, not a thread. You may write up to about ${Math.max(200, (c.maxChars ?? 280) - 100)} characters —`,
+    "  the account is verified, so long-form is allowed. Use the room only when the thought needs",
+    "  it: a few tight paragraphs that go somewhere beat one padded one. Every sentence earns its place.",
     "- Do NOT include any URL, link, or http(s) text — the system appends trusted links for you.",
     "- Do NOT include any 0x address, transaction hash, or long hex string — the system appends those.",
     "- Do NOT add a signature or sign-off (no '- Holo', no name at the end) — the system signs",
