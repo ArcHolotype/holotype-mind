@@ -18,6 +18,7 @@ import { readUsdcBalances } from "./rpc.js";
 import { walletIntegrityOk } from "./wallet.js";
 import { consoleHtml } from "./console.js";
 import { payApprovedMission, reconcileMission } from "./pay.js";
+import { maybeCadencePost, broadcastPublish, broadcastSettlement } from "./broadcast.js";
 import { prepareX402Purchase, executeX402Purchase, getOrPrepareX402Purchase } from "./x402buy.js";
 import { listX402Purchases, reconcileX402Purchase, getPurchaseByKey } from "./x402guard.js";
 import {
@@ -39,6 +40,7 @@ import {
   setMissionTxHash,
   countMissionsSince,
   sumReservedTodayCents,
+  recentXPosts,
 } from "./store.js";
 
 const json = (data: unknown, status = 200): Response =>
@@ -443,6 +445,8 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
       return json({ error: `daily cap would be exceeded ($${projectedUsd.toFixed(2)} > $${cfg.dailyBudgetUsd})` }, 429);
     }
     const id = await createMission(env.DB, { title, description, criteria, rewardCents, chain });
+    // ① publish broadcast (inert unless armed). Best-effort; never affects the response.
+    await broadcastPublish(env, id);
     return json({ ok: true, id });
   }
   if (path === "/creator/missions" && method === "GET") {
@@ -539,6 +543,8 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
         };
         await setMissionApproval(env.DB, id, JSON.stringify(approval));
         await setMissionTxHash(env.DB, id, r.transaction);
+        // ② settlement broadcast (inert unless armed). Best-effort; never affects the response.
+        await broadcastSettlement(env, id, r.transaction);
         return json({ ...r, id, status: "completed" }, 200);
       }
       // An ambiguous outcome (signed but settlement unconfirmed) parks the mission so it is never
@@ -560,7 +566,12 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
       const d = safeJson(m.delivery);
       if (d?.rail === "x402") {
         const r = await reconcileX402Purchase(env.DB, cfg, `mission-${id}`);
-        if (r.ok && r.settled && r.txHash) await setMissionTxHash(env.DB, id, r.txHash);
+        if (r.ok && r.settled && r.txHash) {
+          await setMissionTxHash(env.DB, id, r.txHash);
+          // ② settlement broadcast on reconcile-confirmed settlement (dedup guard prevents a
+          // duplicate if it was already broadcast at pay time). Inert unless armed.
+          await broadcastSettlement(env, id, r.txHash);
+        }
         return json(r, r.ok ? 200 : 409);
       }
       const r = await reconcileMission(env, cfg, id, {
@@ -609,6 +620,20 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
     return json(r, r.ok ? 200 : 409);
   }
 
+  // ---- X self-broadcast ops (creator-gated) ----
+  // POST /creator/x/broadcast — fire one cadence post now (still subject to every gate:
+  // enabled + key + interval + daily cap + budget + content/identity/dedup). Used to launch
+  // and verify the first post on demand instead of waiting for the next cron tick.
+  if (path === "/creator/x/broadcast" && method === "POST") {
+    const r = await maybeCadencePost(env);
+    return json(r ?? { skipped: "inert" });
+  }
+  // GET /creator/x/posts?n= — the broadcast audit log (what Holo posted / what the gate dropped).
+  if (path === "/creator/x/posts" && method === "GET") {
+    const n = Math.min(100, Math.max(1, Number(url.searchParams.get("n") ?? "20")));
+    return json({ posts: await recentXPosts(env.DB, n) });
+  }
+
   return notFound();
 }
 
@@ -626,6 +651,17 @@ async function handleScheduled(event: ScheduledEvent, env: Env, ctx: ExecutionCo
         }
       })
       .catch((e: any) => console.error(`beat error: ${e?.message ?? e}`)),
+  );
+  // X self-broadcast cadence (③). maybeCadencePost is self-guarding (enabled + key + interval
+  // + daily cap + budget) and runs its cheap pre-checks before any model call, so firing it
+  // every tick is free unless a post is actually due. Fully inert until the user arms it.
+  ctx.waitUntil(
+    maybeCadencePost(env)
+      .then((r) => {
+        if (r && "posted" in r && r.posted) console.log(`x broadcast posted id=${r.id ?? "?"}`);
+        else if (r && "skipped" in r) console.log(`x broadcast skipped: ${r.skipped}`);
+      })
+      .catch((e: any) => console.error(`x broadcast error: ${e?.message ?? e}`)),
   );
 }
 

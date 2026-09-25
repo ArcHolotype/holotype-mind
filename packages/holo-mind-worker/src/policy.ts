@@ -29,11 +29,17 @@ const ALLOWED = new Set(["observe", "narrate", "rest", "reflect", "idle", "publi
 const GATED_PROPOSAL = new Set(["buy"]);
 
 // Intents categorically refused until their approval rail exists.
+//
+// post_tweet/publish stay REFUSED as brain intents ON PURPOSE. X posting is not a model
+// decision: it runs only through the worker-controlled broadcast rail (src/xtweet.ts) on a
+// cadence + on real mission/settlement events, behind the fail-closed disclosure/identity/
+// topic/dedup/frequency gate. So even a hijacked model that emits post_tweet cannot post —
+// the speaking path is separate from the intent path, and from the wallet signing path.
 const FORBIDDEN: Record<string, string> = {
   spend: "real-money spend requires per-tx human approval (rail not built yet)",
   transfer: "on-chain transfer requires per-tx human approval (rail not built yet)",
-  post_tweet: "publishing requires a creator-approved content boundary (not set yet)",
-  publish: "publishing requires a creator-approved content boundary (not set yet)",
+  post_tweet: "X posting runs only through the gated worker broadcast rail, never as a model intent",
+  publish: "X posting runs only through the gated worker broadcast rail, never as a model intent",
   self_modify: "self-modification proposals need the pipeline + human sign-off",
   breed: "reproduction is gated behind evolution arming + approval",
 };

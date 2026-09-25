@@ -94,6 +94,7 @@ export function discloseGate(
   text: unknown,
   publicWallet?: string,
   secrets?: readonly string[],
+  alsoAllow?: readonly string[],
 ): DisclosureVerdict {
   if (typeof text !== "string") return { ok: false, reason: "not a string" };
   const value = text;
@@ -104,9 +105,14 @@ export function discloseGate(
   if (KEY_SHAPED_HEX.test(value)) return { ok: false, reason: "key-shaped hex run" };
   const addresses = value.match(new RegExp(ADDRESS_SHAPED_HEX.source, "g"));
   if (addresses) {
-    const allowed = (publicWallet ?? "").toLowerCase();
+    // The public wallet is always allowed (balance/spend transparency is intended); callers
+    // may whitelist additional public on-chain identifiers (e.g. the token contract address)
+    // via alsoAllow. Any other 40-hex address drops the entry.
+    const allowed = new Set(
+      [(publicWallet ?? "").toLowerCase(), ...(alsoAllow ?? []).map((a) => a.toLowerCase())].filter(Boolean),
+    );
     for (const address of addresses) {
-      if (address.toLowerCase() !== allowed) return { ok: false, reason: "address outside public frame" };
+      if (!allowed.has(address.toLowerCase())) return { ok: false, reason: "address outside public frame" };
     }
   }
   const lowered = value.toLowerCase();
@@ -129,7 +135,13 @@ export function discloseGate(
 // public-facing surface (journal, autonomous mission text) shares one source of truth.
 import type { RuntimeConfig } from "./config.js";
 export function secretValues(cfg: RuntimeConfig): string[] {
-  const values: (string | undefined)[] = [cfg.walletKey, cfg.masterKeyHex, cfg.creatorToken, cfg.model];
+  const values: (string | undefined)[] = [
+    cfg.walletKey,
+    cfg.masterKeyHex,
+    cfg.creatorToken,
+    cfg.openTweetApiKey,
+    cfg.model,
+  ];
   for (const url of [...cfg.baseRpcUrls, ...cfg.arcRpcUrls]) {
     values.push(url);
     const tail = url.split("/").filter(Boolean).pop();

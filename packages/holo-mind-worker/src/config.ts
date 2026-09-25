@@ -31,6 +31,16 @@ export interface Env {
   X402_MAX_PER_DAY?: string; // hard cap on x402 purchases per UTC day (default 5)
   X402_MAX_TIMEOUT_SECONDS?: string; // longest validity window we will sign (default 300; seller may bound it lower)
 
+  // X (Twitter) self-broadcast rail — Holo runs its own account via OpenTweet. Disarmed by
+  // default: with X_BROADCAST_ENABLED != "true" OR no OPENTWEET_API_KEY, nothing is posted.
+  X_BROADCAST_ENABLED?: string; // "true" | "false" — broadcast kill switch (default false)
+  X_POST_INTERVAL_HOURS?: string; // min hours between two self-posts (default 3)
+  X_POST_MAX_PER_DAY?: string; // hard cap on self-posts per UTC day (default 8)
+  X_REPLY_MAX_PER_DAY?: string; // hard cap on replies per UTC day (default 12)
+  X_OFFICIAL_HANDLE?: string; // the account Holo runs / may read (default @ArcHolotype)
+  TOKEN_CA?: string; // public token contract address, allowed in public text alongside the wallet
+  OPENTWEET_BASE_URL?: string; // OpenTweet base url (default https://opentweet.io); overridable for a local dry-run mock
+
   // Public on-chain read surface (all public info; the wallet address is Holo's own)
   PUBLIC_WALLET_ADDRESS?: string;
   BASE_RPC_URL?: string;
@@ -41,6 +51,7 @@ export interface Env {
   HOLO_WALLET_KEY?: string; // Base wallet private key (0x…)
   HOLO_MASTER_KEY?: string; // 32-byte AES-GCM key, 64 hex chars
   CREATOR_TOKEN?: string; // admin token gating /creator + /darkroom
+  OPENTWEET_API_KEY?: string; // OpenTweet ot_ key for the X broadcast rail; absent = disarmed (no posting)
   BASE_RPC_URL_PRIVATE?: string; // paid RPC endpoint, overrides BASE_RPC_URL when set
   ARC_RPC_URL_PRIVATE?: string; // paid RPC endpoint, overrides ARC_RPC_URL when set
 }
@@ -72,6 +83,14 @@ export interface RuntimeConfig {
   x402MaxPerPurchaseCents: number;
   x402MaxPerDay: number;
   x402MaxTimeoutSeconds: number;
+  xBroadcastEnabled: boolean;
+  xPostIntervalHours: number;
+  xPostMaxPerDay: number;
+  xReplyMaxPerDay: number;
+  xOfficialHandle: string;
+  tokenCa: string;
+  openTweetBaseUrl: string;
+  openTweetApiKey?: string;
   walletKey?: string;
   masterKeyHex?: string;
   creatorToken?: string;
@@ -96,6 +115,14 @@ export function readConfig(env: Env): RuntimeConfig {
     x402MaxPerPurchaseCents: Math.max(1, Math.round(asNum(env.X402_MAX_PER_PURCHASE_USD, 1) * 100)),
     x402MaxPerDay: Math.max(1, Math.floor(asNum(env.X402_MAX_PER_DAY, 5))),
     x402MaxTimeoutSeconds: Math.max(1, Math.floor(asNum(env.X402_MAX_TIMEOUT_SECONDS, 300))),
+    xBroadcastEnabled: asBool(env.X_BROADCAST_ENABLED, false),
+    xPostIntervalHours: Math.max(1, asNum(env.X_POST_INTERVAL_HOURS, 3)),
+    xPostMaxPerDay: Math.max(1, Math.floor(asNum(env.X_POST_MAX_PER_DAY, 8))),
+    xReplyMaxPerDay: Math.max(0, Math.floor(asNum(env.X_REPLY_MAX_PER_DAY, 12))),
+    xOfficialHandle: (env.X_OFFICIAL_HANDLE ?? "@ArcHolotype").trim(),
+    tokenCa: (env.TOKEN_CA ?? "0xECa7C682fbb32EC4F1B3bBb28791Fe184D3552A8").trim().toLowerCase(),
+    openTweetBaseUrl: (env.OPENTWEET_BASE_URL ?? "https://opentweet.io").trim(),
+    openTweetApiKey: env.OPENTWEET_API_KEY?.trim() || undefined,
     walletKey: env.HOLO_WALLET_KEY?.trim() || undefined,
     masterKeyHex: env.HOLO_MASTER_KEY?.trim() || undefined,
     creatorToken: env.CREATOR_TOKEN?.trim() || undefined,

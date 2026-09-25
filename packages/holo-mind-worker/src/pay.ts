@@ -13,6 +13,7 @@ import type { Env, RuntimeConfig } from "./config.js";
 import { assertWalletIntegrity } from "./wallet.js";
 import { getMission, setMissionStatus, setMissionTxHash } from "./store.js";
 import { rpcCall, withRpcFallback, hexToUint, TRANSFER_TOPIC, assertPayeeIsWallet } from "./rpc.js";
+import { broadcastSettlement } from "./broadcast.js";
 
 const BASE_USDC_ADDRESS = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913" as Address;
 const DECIMALS_SELECTOR = "0x313ce567";
@@ -146,6 +147,9 @@ export async function payApprovedMission(env: Env, cfg: RuntimeConfig, id: numbe
       txHash,
     };
   }
+  // ② settlement broadcast (inert unless X_BROADCAST_ENABLED + OpenTweet key are set).
+  // Best-effort and self-guarding; never changes the payment result.
+  await broadcastSettlement(env, id, txHash);
   return { ok: true, txHash, chain: m.chain, amountUsd, recipient };
 }
 
@@ -231,6 +235,7 @@ export async function reconcileMission(
     }
     if (okFrom && okTo && okValue) {
       await setMissionTxHash(env.DB, id, provided);
+      await broadcastSettlement(env, id, provided); // ② inert unless armed; dedup guards duplicates
       return { ok: true, txHash: provided, chain: m.chain, amountUsd, recipient };
     }
     return { ok: false, reason: "tx does not match wallet -> recipient -> exact amount" };
@@ -238,6 +243,7 @@ export async function reconcileMission(
   const found = await findMatchingOutflow(cfg, m.chain, recipient, amountUsd).catch(() => null);
   if (found) {
     await setMissionTxHash(env.DB, id, found);
+    await broadcastSettlement(env, id, found); // ② inert unless armed; dedup guards duplicates
     return { ok: true, txHash: found, chain: m.chain, amountUsd, recipient };
   }
   if (opts.reset === true) {

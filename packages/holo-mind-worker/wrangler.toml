@@ -71,6 +71,18 @@ NECTAR_MAX_PER_MISSION_USD = "1"   # hard cap on ONE mission's reward (vanilla p
 X402_MAX_PER_PURCHASE_USD = "1"    # hard cap on ONE x402 buyer purchase.
 X402_MAX_PER_DAY = "5"             # hard cap on x402 purchases per UTC day.
 X402_MAX_TIMEOUT_SECONDS = "300"   # longest authorization validity window we will sign (a seller may bound it lower).
+# ===== X (Twitter) self-broadcast rail — Holo runs its own account via OpenTweet =====
+# DISARMED by default: with X_BROADCAST_ENABLED = "false" OR no OPENTWEET_API_KEY secret,
+# nothing is posted. Posting moves no money and never touches the wallet key (the speaking
+# path is isolated from the signing path), but it IS public + irreversible, so it stays off
+# until the user explicitly arms it. Every outbound post/reply passes the fail-closed
+# disclosure + identity + topic + dedup + frequency gate in src/xtweet.ts before it leaves.
+X_BROADCAST_ENABLED = "true"       # GATE: broadcast kill switch. ARMED 2026-09-25 at the user's explicit go-live. "true" = Holo posts on X (cadence + mission events), behind the xtweet.ts gate.
+X_POST_INTERVAL_HOURS = "3"        # min hours between two self-posts (every-3h cadence).
+X_POST_MAX_PER_DAY = "8"           # hard cap on self-posts per UTC day (24/3).
+X_REPLY_MAX_PER_DAY = "12"         # hard cap on replies per UTC day.
+X_OFFICIAL_HANDLE = "@ArcHolotype" # the account Holo runs and may read (its own narrative context).
+TOKEN_CA = "0xECa7C682fbb32EC4F1B3bBb28791Fe184D3552A8" # public token contract; allowed in public text alongside the wallet address.
 MODULATORY_TOPK = "10"             # coupling stage ① (light up the front end, A2): each thought maps onto this many MODULATORY
                                    # neurons (top-K by live MEMBRANE potential — that layer never spikes),
                                    # stored in darkroom.neuron_indices.

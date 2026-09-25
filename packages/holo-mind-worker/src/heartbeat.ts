@@ -16,6 +16,7 @@ import { decide, type Intent, type Verdict } from "./policy.js";
 import { syncTxHashes } from "./evidence.js";
 import { readUsdcBalances } from "./rpc.js";
 import { readWorldDigest } from "./sensors.js";
+import { broadcastPublish } from "./broadcast.js";
 import {
   recordDarkroom,
   countDarkroom,
@@ -341,7 +342,10 @@ export async function beat(env: Env, modelOverride?: string): Promise<BeatResult
         missionsToday < cfg.nectarMaxPerDay &&
         spentToday + (reservedCents + rewardCents) / 100 <= cfg.dailyBudgetUsd;
       if (textOk && withinCaps && title && description && criteria.length > 0) {
-        await createMission(env.DB, { title, description, criteria, rewardCents, chain: "arc" });
+        const newId = await createMission(env.DB, { title, description, criteria, rewardCents, chain: "arc" });
+        // ① publish broadcast (inert unless X_BROADCAST_ENABLED + OpenTweet key are set).
+        // Best-effort and self-guarding; never fails or delays the beat.
+        await broadcastPublish(env, newId);
       }
     } catch (e) {
       // A failed autonomous publish must never fail or delay the beat itself.

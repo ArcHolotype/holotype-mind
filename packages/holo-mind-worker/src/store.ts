@@ -283,3 +283,106 @@ export async function sumReservedTodayCents(db: D1Database, dayPrefix: string): 
     .first<{ s: number }>();
   return Number(r?.s ?? 0);
 }
+
+// ---- X (Twitter) self-broadcast log (holo_x_posts, migration 0007) ----
+// Backs the broadcast rail's code-enforced guards: the every-N-hours cadence and per-day
+// caps count from posted_at over SENT rows only (a candidate the gate dropped never posted,
+// so it must not consume budget), and the no-repeat rule dedups against recent dedup_hash
+// values. Holds no key and moves no money.
+
+export interface XPostRow {
+  id: number;
+  kind: string;
+  text: string;
+  dedup_hash: string;
+  ref: string | null;
+  trigger: string | null;
+  status: string;
+  gate_reason: string | null;
+  opentweet_id: string | null;
+  in_reply_to: string | null;
+  posted_at: string;
+}
+
+export async function recordXPost(
+  db: D1Database,
+  row: {
+    kind: "post" | "reply";
+    text: string;
+    dedupHash: string;
+    ref?: string | null;
+    trigger?: string | null;
+    status?: "sent" | "dropped" | "failed";
+    gateReason?: string | null;
+    opentweetId?: string | null;
+    inReplyTo?: string | null;
+    postedAt?: string;
+  },
+): Promise<number> {
+  const res = await db
+    .prepare(
+      `INSERT INTO holo_x_posts
+         (kind, text, dedup_hash, ref, trigger, status, gate_reason, opentweet_id, in_reply_to, posted_at)
+       VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)`,
+    )
+    .bind(
+      row.kind,
+      row.text,
+      row.dedupHash,
+      row.ref ?? null,
+      row.trigger ?? null,
+      row.status ?? "sent",
+      row.gateReason ?? null,
+      row.opentweetId ?? null,
+      row.inReplyTo ?? null,
+      row.postedAt ?? nowIso(),
+    )
+    .run();
+  return Number(res.meta.last_row_id ?? 0);
+}
+
+// Count of SENT rows of a kind since the start of the given UTC day ("YYYY-MM-DD").
+export async function countXSentSince(db: D1Database, dayPrefix: string, kind: "post" | "reply"): Promise<number> {
+  const r = await db
+    .prepare(`SELECT COUNT(*) AS c FROM holo_x_posts WHERE posted_at LIKE ?1 AND kind = ?2 AND status = 'sent'`)
+    .bind(`${dayPrefix}%`, kind)
+    .first<{ c: number }>();
+  return Number(r?.c ?? 0);
+}
+
+// posted_at of the most recent SENT row of a kind, or null when none — backs the cadence gate.
+export async function lastXSentAt(db: D1Database, kind: "post" | "reply"): Promise<string | null> {
+  const r = await db
+    .prepare(`SELECT posted_at FROM holo_x_posts WHERE kind = ?1 AND status = 'sent' ORDER BY id DESC LIMIT 1`)
+    .bind(kind)
+    .first<{ posted_at: string }>();
+  return r?.posted_at ?? null;
+}
+
+// dedup_hash of the most recent n SENT rows (any kind) — backs the exact-duplicate gate.
+export async function recentXHashes(db: D1Database, n = 40): Promise<string[]> {
+  const { results } = await db
+    .prepare(`SELECT dedup_hash FROM holo_x_posts WHERE status = 'sent' ORDER BY id DESC LIMIT ?1`)
+    .bind(Math.min(200, Math.max(1, n)))
+    .all<{ dedup_hash: string }>();
+  return (results ?? []).map((r) => r.dedup_hash);
+}
+
+// text of the most recent n SENT rows (any kind) — backs the near-duplicate similarity gate.
+export async function recentXTexts(db: D1Database, n = 40): Promise<string[]> {
+  const { results } = await db
+    .prepare(`SELECT text FROM holo_x_posts WHERE status = 'sent' ORDER BY id DESC LIMIT ?1`)
+    .bind(Math.min(200, Math.max(1, n)))
+    .all<{ text: string }>();
+  return (results ?? []).map((r) => r.text);
+}
+
+// Most recent n SENT posts (newest first) — Holo's own published history, fed back as
+// narrative context so it knows what it has already said on its account.
+export async function recentXPosts(db: D1Database, n = 20): Promise<XPostRow[]> {
+  const { results } = await db
+    .prepare(`SELECT * FROM holo_x_posts WHERE status = 'sent' ORDER BY id DESC LIMIT ?1`)
+    .bind(Math.min(200, Math.max(1, n)))
+    .all<XPostRow>();
+  return results ?? [];
+}
