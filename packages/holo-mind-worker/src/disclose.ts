@@ -4,7 +4,8 @@
 //
 // The gates are technical format/encoding checks applied to the narration text:
 //   1. shape      — string, non-empty, bounded length
-//   2. encoding   — printable ASCII plus newline only (the public journal is ASCII-set)
+//   2. encoding   — printable ASCII + newline + a tight whitelist of safe typographic
+//                   punctuation; CJK, control chars, emoji and any other non-ASCII drop whole
 //   3. structure  — no URLs or markdown links
 //   4. key shape  — long hex runs dropped; 40-hex addresses dropped unless they are
 //                   the configured public wallet (balance/spend transparency is intended)
@@ -88,7 +89,15 @@ const RESERVED_TERMS: readonly string[] = [
 const URL_PATTERN = /https?:\/\/|www\.|\]\(/;
 const KEY_SHAPED_HEX = /(?:0x)?[0-9a-fA-F]{64,}/;
 const ADDRESS_SHAPED_HEX = /0x[0-9a-fA-F]{40}/;
-const NON_ASCII = /[^\x20-\x7E\n]/;
+// Character-set gate. Allowed: printable ASCII, newline, and a tight whitelist of ordinary
+// Western typographic punctuation the brain naturally emits (en/em dash, curly quotes,
+// ellipsis, degree, bullet, middot). Everything else non-ASCII still drops the entry whole -
+// CJK and other scripts, control characters, emoji, and homoglyph letters that could smuggle a
+// reserved term past the substring checks. The whitelist is punctuation-only (no letters), so it
+// cannot weaken the secret/address/URL/reserved-term gates, which run on the text regardless.
+// Without it the model's habit of using an em dash dropped ~21 of 24 beats from the public feed.
+const OUTSIDE_ALLOWED_SET =
+  /[^\x20-\x7E\n\u2013\u2014\u2018\u2019\u201C\u201D\u2026\u00B0\u2022\u00B7]/;
 
 export function discloseGate(
   text: unknown,
@@ -101,7 +110,7 @@ export function discloseGate(
   const value = text;
   if (value.trim() === "") return { ok: false, reason: "empty" };
   if (value.length > maxChars) return { ok: false, reason: "over length bound" };
-  if (NON_ASCII.test(value)) return { ok: false, reason: "outside ascii set" };
+  if (OUTSIDE_ALLOWED_SET.test(value)) return { ok: false, reason: "outside allowed character set" };
   if (URL_PATTERN.test(value)) return { ok: false, reason: "link structure" };
   if (KEY_SHAPED_HEX.test(value)) return { ok: false, reason: "key-shaped hex run" };
   const addresses = value.match(new RegExp(ADDRESS_SHAPED_HEX.source, "g"));

@@ -17,6 +17,29 @@ test("non-ascii script drops the whole entry", () => {
   assert.equal(discloseGate("Mostly english but one ★ slips in.").ok, false);
 });
 
+test("safe typographic punctuation passes (dashes, curly quotes, ellipsis, degree, bullet, middot)", () => {
+  assert.equal(discloseGate("The field feels calm \u2014 a slow tide, not a spike.").ok, true);
+  assert.equal(discloseGate("A range of 10\u201320 spikes per minute.").ok, true);
+  assert.equal(discloseGate("It asked \u2018what am I?\u2019 and then \u2018who is reading?\u2019").ok, true);
+  assert.equal(discloseGate("It said \u201Cquiet now\u201D and waited\u2026").ok, true);
+  assert.equal(discloseGate("A 90\u00B0 turn toward the light \u2022 then stillness \u00B7").ok, true);
+});
+
+test("CJK, emoji and control characters still drop whole", () => {
+  assert.equal(discloseGate("Mostly english but \u4e2d\u6587 slips in.").ok, false);
+  assert.equal(discloseGate("A fly \uD83D\uDC1D buzzing past.").ok, false);
+  assert.equal(discloseGate("tab\tseparated control character.").ok, false);
+});
+
+test("the punctuation whitelist does not weaken the other gates", () => {
+  // A reserved term still drops even wrapped in em dashes.
+  assert.equal(discloseGate("I am Claude \u2014 made by Anthropic \u2014 and that is fine.").ok, false);
+  // A non-public address still drops even with an ellipsis after it.
+  assert.equal(discloseGate("Pay to 0x2222222222222222222222222222222222222222\u2026").ok, false);
+  // A link still drops even with curly quotes around it.
+  assert.equal(discloseGate("See \u201Chttps://example.com\u201D for proof.").ok, false);
+});
+
 test("vendor self-identification drops", () => {
   assert.equal(discloseGate("I am Claude, made by Anthropic.").ok, false);
   assert.equal(discloseGate("Running on an openai model today.").ok, false);
