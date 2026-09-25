@@ -42,6 +42,7 @@ import {
   countMissionsSince,
   sumReservedTodayCents,
   listBlacklist,
+  removeBlacklist,
   recentXPosts,
   countXSelfSentToday,
   countXSentAllToday,
@@ -472,7 +473,17 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
   if (path === "/creator/blacklist" && method === "GET") {
     return json({ blacklist: await listBlacklist(env.DB, 200) });
   }
-  const missionAction = path.match(/^\/creator\/missions\/(\d+)\/(claim|delivery|check|approve|cancel|pay|reconcile|x402-quote|x402-pay)$/);
+  // POST /creator/blacklist/remove — clear a wrongful ban (body {key}). The scanner blacklists a
+  // claimant/address whenever it refuses a delivery; a false positive permanently bans an honest
+  // counterparty until this removes it. key = the claimant string or the payout address.
+  if (path === "/creator/blacklist/remove" && method === "POST") {
+    const body = await readBody(req);
+    const key = String(body?.key ?? "").trim();
+    if (!key) return json({ error: "key required" }, 400);
+    const removed = await removeBlacklist(env.DB, key);
+    return json({ ok: true, key: key.toLowerCase(), removed });
+  }
+  const missionAction = path.match(/^\/creator\/missions\/(\d+)\/(claim|delivery|check|approve|cancel|pay|reconcile|reset|x402-quote|x402-pay)$/);
   if (missionAction && method === "POST") {
     const id = Number(missionAction[1]);
     const action = missionAction[2];
@@ -599,6 +610,42 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
         reset: body?.reset === true,
       });
       return json(r, r.ok ? 200 : 409);
+    }
+    if (action === "reset") {
+      // Recovery from an autonomous FALSE refusal. Only a mission the settle rail parked as
+      // "rejected" (injection scan or blacklist hit) can be reset; "changes_requested" is an
+      // honest-but-insufficient verdict the agent may simply resubmit, so it is left alone.
+      // Reset is a human override: it writes the same approval record a creator approve writes
+      // (by:"creator-reset") and moves the mission to approved-UNPAID, which (a) escapes the
+      // autonomous queue — settle only picks approval_pending, so it would re-scan and re-reject
+      // a deterministically-refused delivery — and (b) keeps the money behind the creator's own
+      // PAY NOW. It also clears any blacklist entry the false refusal created, so an honest
+      // counterparty is not permanently banned. No money moves here.
+      if (m.status !== "rejected") {
+        return json({ error: `only a rejected mission can be reset (status=${m.status})` }, 409);
+      }
+      const d = safeJson(m.delivery);
+      if (d?.rail === "x402") {
+        return json({ error: "x402 missions settle via PAY NOW (x402-quote -> x402-pay), not reset" }, 409);
+      }
+      const recipient = String(d?.recipient ?? "").trim();
+      if (!recipient) {
+        return json({ error: "delivery has no recipient address; cannot prepare a payable approval" }, 409);
+      }
+      const approval = {
+        by: "creator-reset",
+        at: new Date().toISOString(),
+        missionId: id,
+        amountCents: m.reward_cents,
+        recipient,
+        nonce: crypto.randomUUID(),
+      };
+      await setMissionApproval(env.DB, id, JSON.stringify(approval));
+      const claimant = String(m.claimant ?? "").trim();
+      let unblacklisted = 0;
+      if (claimant) unblacklisted += await removeBlacklist(env.DB, claimant);
+      unblacklisted += await removeBlacklist(env.DB, recipient);
+      return json({ ok: true, id, status: "approved", unpaid: true, unblacklisted, approval });
     }
     if (action === "cancel") {
       await setMissionStatus(env.DB, id, "cancelled");

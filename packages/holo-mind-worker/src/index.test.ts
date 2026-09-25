@@ -14,13 +14,17 @@ const ARC_USDC = "0x3600000000000000000000000000000000000000";
 const NONCE = "0x" + "ab".repeat(32);
 
 // Fake D1 covering exactly the statements these routes issue: getMission (SELECT first),
-// setMissionDelivery / setMissionStatus (UPDATE run), getPurchaseByKey (SELECT first).
+// setMissionDelivery / setMissionStatus / setMissionApproval (UPDATE run), getPurchaseByKey
+// (SELECT first), and removeBlacklist (DELETE run).
 function fakeEnv(opts: {
   mission: Record<string, unknown>;
   purchase?: Record<string, unknown> | null;
+  blacklist?: string[];
+  creatorToken?: string;
 }): Env {
   // Mutate the caller's object in place so a test can read back what a route wrote.
   const mission = opts.mission;
+  const banned = new Set((opts.blacklist ?? []).map((k) => k.toLowerCase()));
   const db = {
     prepare(sql: string) {
       let b: unknown[] = [];
@@ -47,9 +51,20 @@ function fakeEnv(opts: {
             mission.status = "submitted";
             return { meta: { changes: 1 } };
           }
+          if (/SET approval = \?1/.test(sql)) {
+            mission.approval = b[0];
+            mission.status = "approved";
+            return { meta: { changes: 1 } };
+          }
           if (/SET status = \?1/.test(sql)) {
             mission.status = b[0];
             return { meta: { changes: 1 } };
+          }
+          if (/DELETE FROM holo_mission_blacklist/.test(sql)) {
+            const k = String(b[0] ?? "").toLowerCase();
+            const had = banned.has(k);
+            banned.delete(k);
+            return { meta: { changes: had ? 1 : 0 } };
           }
           return { meta: { changes: 1 } };
         },
@@ -57,7 +72,7 @@ function fakeEnv(opts: {
       return stmt;
     },
   };
-  return { DB: db } as unknown as Env;
+  return { DB: db, CREATOR_TOKEN: opts.creatorToken ?? "test-creator-token" } as unknown as Env;
 }
 
 function baseMission(over: Record<string, unknown> = {}) {
@@ -83,6 +98,15 @@ const post = (path: string, body: unknown) =>
   new Request("https://mind.test" + path, {
     method: "POST",
     headers: { "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+// A creator-token-gated POST. The gate masks failures as 404, so an unauthenticated probe of a
+// /creator route must never reach the handler.
+const authedPost = (path: string, body: unknown, token = "test-creator-token") =>
+  new Request("https://mind.test" + path, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-admin-token": token },
     body: JSON.stringify(body),
   });
 
@@ -199,4 +223,76 @@ test("evidence for a vanilla settlement has no x402 block and method=transfer", 
   assert.equal(body.settlement.method, "transfer");
   assert.equal(body.settlement.recipient, RECIPIENT);
   assert.equal(body.x402, null);
+});
+
+// ---- creator recovery from an autonomous false refusal (reset + unblacklist) ----
+
+const VANILLA_DELIVERY = JSON.stringify({
+  summary: "A plain-text report the injection scanner wrongly refused.",
+  artifact: "https://paste.example/abc123",
+  recipient: RECIPIENT,
+  evidence: ["one criterion"],
+  rail: "vanilla",
+});
+
+test("reset recovers a rejected vanilla mission to approved-unpaid, locks the approval, and clears the ban", async () => {
+  const mission = baseMission({ status: "rejected", claimant: "honest-agent", delivery: VANILLA_DELIVERY });
+  const env = fakeEnv({ mission, blacklist: ["honest-agent", RECIPIENT] });
+  const res = await worker.fetch(authedPost("/creator/missions/1/reset", {}), env);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as any;
+  assert.equal(body.status, "approved");
+  assert.equal(body.unpaid, true);
+  // Both the claimant and the payout address the false refusal banned are cleared.
+  assert.equal(body.unblacklisted, 2);
+  assert.equal(body.approval.by, "creator-reset");
+  assert.equal(body.approval.amountCents, 50);
+  assert.equal(body.approval.recipient, RECIPIENT);
+  // The mission row itself moved to approved with the approval record written (PAY NOW gate next).
+  assert.equal(mission.status, "approved");
+  assert.equal(JSON.parse(String(mission.approval)).by, "creator-reset");
+});
+
+test("reset refuses a mission that was not autonomously rejected", async () => {
+  const mission = baseMission({ status: "completed", delivery: VANILLA_DELIVERY });
+  const env = fakeEnv({ mission });
+  const res = await worker.fetch(authedPost("/creator/missions/1/reset", {}), env);
+  assert.equal(res.status, 409);
+  assert.match(((await res.json()) as any).error, /only a rejected mission/);
+});
+
+test("reset refuses an x402 delivery (those settle via PAY NOW)", async () => {
+  const mission = baseMission({
+    status: "rejected",
+    delivery: JSON.stringify({ summary: "s", artifact: "a", x402Endpoint: "https://seller.test/x", rail: "x402", evidence: ["e"] }),
+  });
+  const env = fakeEnv({ mission });
+  const res = await worker.fetch(authedPost("/creator/missions/1/reset", {}), env);
+  assert.equal(res.status, 409);
+  assert.match(((await res.json()) as any).error, /x402 missions settle via PAY NOW/);
+});
+
+test("reset is creator-gated: no token looks like a 404 and changes nothing", async () => {
+  const mission = baseMission({ status: "rejected", delivery: VANILLA_DELIVERY });
+  const env = fakeEnv({ mission });
+  const res = await worker.fetch(post("/creator/missions/1/reset", {}), env);
+  assert.equal(res.status, 404);
+  assert.equal(mission.status, "rejected");
+});
+
+test("blacklist/remove clears a wrongful ban and reports how many rows went", async () => {
+  const mission = baseMission();
+  const env = fakeEnv({ mission, blacklist: ["honest-agent"] });
+  const res = await worker.fetch(authedPost("/creator/blacklist/remove", { key: "Honest-Agent" }), env);
+  assert.equal(res.status, 200);
+  const body = (await res.json()) as any;
+  assert.equal(body.ok, true);
+  assert.equal(body.key, "honest-agent"); // normalized to the stored lowercase form
+  assert.equal(body.removed, 1);
+});
+
+test("blacklist/remove requires a key", async () => {
+  const env = fakeEnv({ mission: baseMission() });
+  const res = await worker.fetch(authedPost("/creator/blacklist/remove", {}), env);
+  assert.equal(res.status, 400);
 });

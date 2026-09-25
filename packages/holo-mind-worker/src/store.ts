@@ -323,6 +323,16 @@ export async function listBlacklist(db: D1Database, limit = 100): Promise<Blackl
   return results ?? [];
 }
 
+// Creator recovery from a false refusal: drop a claimant/address the injection scanner wrongly
+// banned so an honest counterparty can deliver again. Returns the number of rows removed (0 if
+// the key was not listed). The key is normalized the same way addBlacklist stores it.
+export async function removeBlacklist(db: D1Database, bkey: string): Promise<number> {
+  const k = String(bkey ?? "").trim().toLowerCase();
+  if (!k) return 0;
+  const r = await db.prepare(`DELETE FROM holo_mission_blacklist WHERE bkey = ?1`).bind(k).run();
+  return r.meta?.changes ?? 0;
+}
+
 // ---- X (Twitter) self-broadcast log (holo_x_posts, migration 0007) ----
 // Backs the broadcast rail's code-enforced guards: the every-N-hours cadence and per-day
 // caps count from posted_at over SENT rows only (a candidate the gate dropped never posted,
