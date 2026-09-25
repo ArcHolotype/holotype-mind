@@ -87,6 +87,9 @@ export interface XPostStore {
 export interface XTweetDeps {
   fetchImpl?: typeof fetch;
   now?: () => Date;
+  sleep?: (ms: number) => Promise<void>;
+  pollAttempts?: number; // how many times to poll GET /posts/:id for the async publish result
+  pollDelayMs?: number; // delay between publish-status polls
 }
 
 export interface PostResult {
@@ -183,14 +186,40 @@ function finalScan(text: string, cfg: XBroadcastConfig): { ok: boolean; reason: 
   return { ok: true, reason: "ok" };
 }
 
-interface OpenTweetResponse {
-  success?: boolean;
-  posted?: boolean;
-  x_post_id?: string;
-  id?: string;
+interface OpenTweetXResult {
+  platform?: string;
+  status?: string;
+  post_id?: string;
   url?: string;
-  posts?: { id?: string }[];
-  results?: { platform?: string; status?: string; post_id?: string; url?: string }[];
+}
+interface OpenTweetPost {
+  id?: string;
+  posted?: boolean;
+  failed?: boolean;
+  status?: string;
+  x_post_id?: string;
+  url?: string;
+  results?: OpenTweetXResult[];
+}
+interface OpenTweetResponse extends OpenTweetPost {
+  success?: boolean;
+  posts?: OpenTweetPost[];
+  post?: OpenTweetPost;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+// Read the publish state from any level of an OpenTweet response (top level, posts[0], or a
+// single-post GET). OpenTweet attaches x_post_id/posted/results once the async X publish
+// lands, so a 201 create response may not carry them yet — hence the poll in postTweet.
+function publishState(o?: OpenTweetPost | null): { published: boolean; failed: boolean; id: string | null; url: string | null } {
+  if (!o) return { published: false, failed: false, id: null, url: null };
+  const xr = (o.results ?? []).find((r) => r.platform === "x");
+  const published = o.posted === true || !!o.x_post_id || o.status === "posted" || xr?.status === "published";
+  const failed = o.failed === true || o.status === "failed" || xr?.status === "failed";
+  const id = o.x_post_id ?? xr?.post_id ?? o.id ?? null;
+  const url = xr?.url ?? o.url ?? null;
+  return { published, failed, id, url };
 }
 
 // Post one tweet to X via OpenTweet. `prose` is model-generated and gated; `suffix` is
@@ -279,6 +308,11 @@ export async function postTweet(
     return drop(`opentweet request failed: ${(e as Error).message}`, "failed");
   }
 
+  // A non-2xx means OpenTweet did not publish (e.g. 502 = saved but not published).
+  if (res.status !== 200 && res.status !== 201) {
+    return drop(`opentweet http ${res.status}`, "failed");
+  }
+
   let otResp: OpenTweetResponse = {};
   try {
     otResp = (await res.json()) as OpenTweetResponse;
@@ -286,15 +320,65 @@ export async function postTweet(
     otResp = {};
   }
 
-  const xResult = (otResp.results ?? []).find((r) => r.platform === "x");
-  const published = res.status === 201 && (otResp.posted === true || !!otResp.x_post_id || xResult?.status === "published");
-  if (!published) {
-    const reason = `opentweet did not publish (http ${res.status}${otResp.success === false ? ", success=false" : ""})`;
-    return drop(reason, "failed");
+  // Publish confirmation may sit at the top level or inside posts[0]; check both.
+  const top = publishState(otResp);
+  const first = publishState(otResp.posts?.[0]);
+  let published = top.published || first.published;
+  let failed = top.failed || first.failed;
+  let id = top.id ?? first.id ?? otResp.posts?.[0]?.id ?? otResp.id ?? null;
+  let url = top.url ?? first.url ?? null;
+
+  // OpenTweet publishes asynchronously: a 201 can arrive before the X result is attached.
+  // Poll the post by id until it reports published/failed (bounded), so a real success is
+  // never mis-recorded as a failure — a 'failed' row would let the cadence gate fire a
+  // duplicate post on the next tick.
+  const postId = otResp.posts?.[0]?.id ?? otResp.id ?? null;
+  if (!published && !failed && postId) {
+    const attempts = deps.pollAttempts ?? 4;
+    const delay = deps.pollDelayMs ?? 700;
+    const sleep = deps.sleep ?? defaultSleep;
+    const base = cfg.baseUrl.replace(/\/$/, "");
+    for (let i = 0; i < attempts && !published && !failed; i++) {
+      await sleep(delay);
+      try {
+        const g = await fetchImpl(`${base}/api/v1/posts/${postId}`, {
+          headers: { Authorization: `Bearer ${cfg.apiKey}` },
+        });
+        const gj = (await g.json()) as OpenTweetResponse;
+        const st = publishState(gj.post ?? gj);
+        if (st.published) {
+          published = true;
+          id = st.id ?? id;
+          url = st.url ?? url;
+        } else if (st.failed) {
+          failed = true;
+        }
+      } catch {
+        // ignore a transient poll error and try again
+      }
+    }
   }
 
-  const id = otResp.x_post_id ?? xResult?.post_id ?? otResp.posts?.[0]?.id ?? otResp.id ?? null;
-  const url = xResult?.url ?? otResp.url ?? null;
+  if (failed) return drop("opentweet reported publish failed", "failed");
+
+  if (!published) {
+    // 201 accepted + publish_now requested, but the publish result never confirmed within the
+    // poll window. Record as SENT so it occupies the cadence/dedup slot: OpenTweet has the post
+    // and will publish it, and a duplicate public post is worse than an optimistic record.
+    const rowId = await store.recordXPost({
+      kind,
+      text,
+      dedupHash: hash,
+      ref: opts.ref ?? null,
+      trigger: opts.trigger ?? null,
+      status: "sent",
+      gateReason: "publish unconfirmed after poll; recorded sent to prevent a duplicate",
+      opentweetId: id,
+      postedAt: nowDate.toISOString(),
+    });
+    return { posted: true, status: "sent", reason: "publish unconfirmed (recorded sent)", id, url, rowId };
+  }
+
   const rowId = await store.recordXPost({
     kind,
     text,

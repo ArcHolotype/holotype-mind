@@ -91,6 +91,20 @@ const PUBLISHED = {
   results: [{ platform: "x", status: "published", post_id: "1834000000000000001", url: "https://x.com/i/web/status/1834000000000000001" }],
 };
 
+// A fetch mock that routes by request, so a test can return a create-only 201 for the POST
+// and a published state for the follow-up GET poll (OpenTweet publishes asynchronously).
+function routingFetch(handler: (url: string, init: any) => { status: number; body: unknown }) {
+  const calls: { url: string; init: any }[] = [];
+  const fetchImpl = async (url: any, init: any) => {
+    const u = String(url);
+    calls.push({ url: u, init });
+    const { status, body } = handler(u, init);
+    return new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+  };
+  return { fetchImpl: fetchImpl as unknown as typeof fetch, calls };
+}
+const noSleep = async () => {};
+
 const NOW = new Date("2026-09-25T12:00:00.000Z");
 const now = () => NOW;
 
@@ -301,4 +315,51 @@ test("isolation: the broadcast config carries no wallet key", () => {
   assert.equal(bc.apiKey, OT_KEY);
   assert.ok(bc.secrets.includes(OT_KEY)); // the ot_ key is itself a guarded secret
   assert.equal(contentGate("a calm thought", bc).ok, true);
+});
+
+test("publish confirmed via nested posts[0] without polling", async () => {
+  const { fetchImpl, calls } = routingFetch(() => ({
+    status: 201,
+    body: { success: true, count: 1, posts: [{ id: "p1", posted: true, x_post_id: "999", results: [{ platform: "x", status: "published", post_id: "999", url: "https://x.com/i/status/999" }] }] },
+  }));
+  const r = await postTweet(cfg(), fakeStore(), { prose: "a calm fresh thought about the sill" }, { fetchImpl, now, sleep: noSleep, pollDelayMs: 0 });
+  assert.equal(r.posted, true);
+  assert.equal(r.id, "999");
+  assert.equal(calls.length, 1); // confirmed synchronously, no poll
+});
+
+test("async publish: 201 create-only, then the poll confirms published", async () => {
+  const { fetchImpl, calls } = routingFetch((url, init) => {
+    if (init?.method === "POST") return { status: 201, body: { success: true, count: 1, posts: [{ id: "post_abc" }] } };
+    return { status: 200, body: { post: { id: "post_abc", posted: true, x_post_id: "1834x", status: "posted", results: [{ platform: "x", status: "published", post_id: "1834x", url: "https://x.com/i/status/1834x" }] } } };
+  });
+  const store = fakeStore();
+  const r = await postTweet(cfg(), store, { prose: "a fresh distinct thought about warm glass" }, { fetchImpl, now, sleep: noSleep, pollDelayMs: 0, pollAttempts: 3 });
+  assert.equal(r.posted, true);
+  assert.equal(r.status, "sent");
+  assert.equal(r.id, "1834x");
+  assert.ok(calls.length >= 2, "expected a POST plus at least one poll GET");
+  assert.equal(store.rows[0].status, "sent");
+});
+
+test("unconfirmed publish after polling is recorded sent (prevents a duplicate)", async () => {
+  const { fetchImpl } = routingFetch((url, init) => {
+    if (init?.method === "POST") return { status: 201, body: { success: true, posts: [{ id: "p2" }] } };
+    return { status: 200, body: { post: { id: "p2", posted: false, failed: false, status: "pending" } } };
+  });
+  const store = fakeStore();
+  const r = await postTweet(cfg(), store, { prose: "another distinct fresh thought here" }, { fetchImpl, now, sleep: noSleep, pollDelayMs: 0, pollAttempts: 2 });
+  assert.equal(r.posted, true); // optimistic: occupies the cadence slot
+  assert.equal(r.status, "sent");
+  assert.match(r.reason, /unconfirmed/);
+  assert.equal(store.rows[0].status, "sent");
+});
+
+test("non-2xx (502 saved-not-published) is recorded failed", async () => {
+  const { fetchImpl } = routingFetch(() => ({ status: 502, body: { success: false } }));
+  const store = fakeStore();
+  const r = await postTweet(cfg(), store, { prose: "a calm distinct tick on the sill" }, { fetchImpl, now, sleep: noSleep });
+  assert.equal(r.posted, false);
+  assert.equal(r.status, "failed");
+  assert.equal(store.rows[0].status, "failed");
 });
