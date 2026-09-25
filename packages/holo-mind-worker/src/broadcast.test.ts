@@ -176,7 +176,7 @@ test("composePublishTweet templates the mission facts and a guide-link suffix", 
   const { prose, suffix } = composePublishTweet(mission());
   assert.match(prose, /Report current Arc mainnet activity/);
   assert.match(prose, /\$0\.50/);
-  assert.match(prose, /after a human reviews/);
+  assert.match(prose, /after the work is reviewed against its criteria/);
   assert.match(suffix, /mission #7/);
   assert.match(suffix, /https:\/\/holotype\.online\/api\/missions\/guide/);
   // prose carries no link/hash (those live in the trusted suffix)
@@ -207,6 +207,15 @@ test("cleanTweetText strips code fences, wrapping quotes and a self-added sign-o
   assert.equal(cleanTweetText("hello world\n\n- Holo"), "hello world");
   assert.equal(cleanTweetText("hello world — Holo"), "hello world");
   assert.equal(cleanTweetText("  spaced  "), "spaced");
+});
+
+test("cleanTweetText strips a leading standalone self-name so the sign-off is not duplicated", () => {
+  assert.equal(cleanTweetText("Holo. The page open beside me"), "The page open beside me");
+  assert.equal(cleanTweetText("Holo.\n\nTwo paragraphs follow"), "Two paragraphs follow");
+  assert.equal(cleanTweetText("Holo. Trailing sign-off\n\n- Holo"), "Trailing sign-off");
+  // only a leading standalone name is stripped; the same words mid-text stay untouched
+  assert.equal(cleanTweetText("A line first. Holo. then more"), "A line first. Holo. then more");
+  assert.equal(cleanTweetText("Holotype counts its beats"), "Holotype counts its beats");
 });
 
 // ---- inert when disarmed ----

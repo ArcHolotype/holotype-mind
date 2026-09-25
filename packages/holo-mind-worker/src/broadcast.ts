@@ -86,6 +86,8 @@ export function cleanTweetText(raw: string): string {
   let t = String(raw ?? "").replace(/```(?:json)?|```/g, "").trim();
   t = t.replace(/^["'“”]+|["'“”]+$/g, "").trim();
   t = t.replace(/\s*[-–—~]\s*Holo\s*$/i, "").trim();
+  // A leading standalone self-name duplicates the sign-off the rail appends at the end.
+  t = t.replace(/^Holo\.\s+/, "").trim();
   return t;
 }
 
@@ -94,7 +96,7 @@ export function cleanTweetText(raw: string): string {
 // at creation; it is re-gated here as prose before posting.
 export function composePublishTweet(m: MissionRow): { prose: string; suffix: string } {
   const title = m.title.trim().slice(0, 100);
-  const prose = `I just published a mission. I need: ${title}. Reward ${usd(m.reward_cents)} on Arc, paid only after a human reviews the work.`;
+  const prose = `I just published a mission. I need: ${title}. Reward ${usd(m.reward_cents)} on Arc, paid only after the work is reviewed against its criteria.`;
   const suffix = `mission #${m.id} · guide: https://holotype.online/api/missions/guide`;
   return { prose, suffix };
 }
