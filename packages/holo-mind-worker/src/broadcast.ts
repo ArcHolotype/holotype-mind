@@ -280,26 +280,53 @@ export async function maybeCadencePost(env: Env, deps: CadenceDeps = {}): Promis
 
   const excludeIds: number[] = [];
   let lastOutcome: BroadcastOutcome = null;
+
+  // A failed attempt must still move the schedule forward. Without this, a rail that keeps
+  // failing (the model returning empty, OpenTweet erroring, a run of gate drops) would retry on
+  // every 15-minute tick: up to 96 rounds x 3 generations a day of wasted spend plus needless
+  // hammering of the posting API. The backoff still recovers within the hour if the cause was
+  // transient, and the daily budget cap remains the outer stop.
+  const backoff = async (outcome: BroadcastOutcome): Promise<BroadcastOutcome> => {
+    await ports
+      .setSchedule(new Date(now.getTime() + cfg.xFailBackoffMinutes * 60_000).toISOString(), null, now.toISOString())
+      .catch(() => {});
+    return outcome;
+  };
+
   for (let attempt = 0; attempt <= cfg.xPostRetryMax; attempt++) {
     const corpus = await ports.pickCorpus({ cooldownCutoffIso: cooldownCutoff, topicCutoffIso: topicCutoff, excludeIds });
-    const prose = await ports.generateProse({ corpus, angle });
+    // A throw here is expected eventually — an empty wallet makes the inference payment fail —
+    // and an exception escaping the loop would skip the backoff and put us straight back into a
+    // retry-every-tick loop. Funnel it into the same bounded path as a refused draft.
+    let prose = "";
+    let result: PostResult | null = null;
+    try {
+      prose = await ports.generateProse({ corpus, angle });
+      if (prose) {
+        result = await postTweet(
+          broadcastConfig(cfg),
+          ports.store,
+          {
+            prose,
+            trigger: "cadence",
+            corpusId: corpus?.id ?? null,
+            angle: angle.key,
+            ref: corpus ? `corpus-${corpus.id}` : null,
+          },
+          deps,
+        );
+      }
+    } catch (e) {
+      lastOutcome = { skipped: `generation or posting threw: ${(e as Error)?.message ?? e}` };
+      if (corpus) excludeIds.push(corpus.id);
+      continue;
+    }
     if (!prose) {
       lastOutcome = { skipped: "empty generation" };
       if (corpus) excludeIds.push(corpus.id);
       continue;
     }
-    const result = await postTweet(
-      broadcastConfig(cfg),
-      ports.store,
-      {
-        prose,
-        trigger: "cadence",
-        corpusId: corpus?.id ?? null,
-        angle: angle.key,
-        ref: corpus ? `corpus-${corpus.id}` : null,
-      },
-      deps,
-    );
+    if (!result) continue;
     lastOutcome = result;
     if (result.posted) {
       // Stamp the material only on a real send, so an unlucky run of dropped drafts does not
@@ -320,12 +347,12 @@ export async function maybeCadencePost(env: Env, deps: CadenceDeps = {}): Promis
         .catch(() => {});
       return result;
     }
-    if (!isRetryableDrop(result.reason)) return result;
+    if (!isRetryableDrop(result.reason)) return await backoff(result);
     // A content-side drop means this material or this wording was refused: exclude the excerpt
     // and try again with something else, which is what keeps the daily floor reachable.
     if (corpus) excludeIds.push(corpus.id);
   }
-  return lastOutcome ?? { skipped: "no attempt made" };
+  return await backoff(lastOutcome ?? { skipped: "no attempt made" });
 }
 
 // ---------------------------------------------------------------------------

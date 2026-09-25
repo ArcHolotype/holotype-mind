@@ -95,6 +95,9 @@ X_GAP_MAX_MINUTES = "120"          # longest random gap between two self-posts.
 X_BEHIND_GAP_MINUTES = "20"        # gap used while catching up to the floor.
 X_POST_RETRY_MAX = "2"             # extra attempts when a draft is dropped by a content gate
                                    # (each attempt costs one inference call).
+X_FAIL_BACKOFF_MINUTES = "60"      # wait this long after a FAILED attempt. Without it a rail
+                                   # that keeps failing would retry every 15min tick: up to
+                                   # 96 rounds x 3 generations a day of wasted spend.
 # --- Reading material: vetted Drosophila neuroscience excerpts, fetched by the slow cron from
 # --- a fixed whitelist (Europe PMC / Wikipedia / PLOS / OpenAlex) and stored in holo_x_corpus.
 # --- The posting path reads only that table; it never touches the network.

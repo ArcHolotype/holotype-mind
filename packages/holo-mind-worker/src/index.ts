@@ -694,7 +694,7 @@ async function handleScheduled(event: ScheduledEvent, env: Env, ctx: ExecutionCo
   // The daily corpus top-up. Bounded per run (a few topics = a handful of subrequests) so it
   // stays inside the free-tier limits, and best-effort: a dead science API only means fewer new
   // excerpts, never a missed post.
-  if (event.cron === INGEST_CRON) {
+  if (String(event.cron ?? "").replace(/\s+/g, " ").trim() === INGEST_CRON) {
     ctx.waitUntil(
       maybeIngestCorpus(env)
         .then((r) => console.log(`corpus ingest stored=${r.stored} rejected=${r.rejected} dup=${r.duplicate} total=${r.total}${r.skipped ? ` skipped=${r.skipped}` : ""}${r.errors.length ? ` errors=${r.errors.join(";")}` : ""}`))

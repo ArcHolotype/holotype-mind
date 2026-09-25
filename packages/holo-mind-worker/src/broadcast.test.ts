@@ -420,3 +420,56 @@ test("drawGapMinutes spreads a shortfall instead of bursting", () => {
   // Never longer than the band, even with a huge runway.
   assert.equal(drawGapMinutes(band, { behind: true, remaining: 1, hoursLeft: 23 }, () => 0.5), 120);
 });
+
+// ---- failure backoff: a broken rail must not retry on every 15-minute tick ----
+
+test("a failed attempt still advances the schedule by the backoff", async () => {
+  const { fetchImpl } = mockFetch();
+  const { ports, calls } = fakePorts({
+    corpus: [corpusItem(1, "sleep"), corpusItem(2, "olfaction"), corpusItem(3, "vision")],
+    prose: () => `my key is ${FAKE_KEY}`, // every draft is refused
+  });
+  const r = await maybeCadencePost(fakeEnv({ X_POST_RETRY_MAX: "2", X_FAIL_BACKOFF_MINUTES: "60" }), { now: () => NOW, fetchImpl, ports });
+  assert.ok(r && "posted" in r && !r.posted);
+  assert.equal(calls.generated, 3);
+  // Exactly one schedule write, one hour out, with no drawn gap (null marks a backoff).
+  assert.equal(calls.scheduled.length, 1, JSON.stringify(calls.scheduled));
+  assert.equal(calls.scheduled[0].gap, null);
+  assert.equal(calls.scheduled[0].nextIso, "2026-09-25T13:00:00.000Z");
+});
+
+test("an empty generation backs off too (the model returning nothing must not spin)", async () => {
+  const { fetchImpl } = mockFetch();
+  const { ports, calls } = fakePorts({ corpus: [corpusItem(1, "sleep")], prose: () => "" });
+  const r = await maybeCadencePost(fakeEnv({ X_POST_RETRY_MAX: "1", X_FAIL_BACKOFF_MINUTES: "45" }), { now: () => NOW, fetchImpl, ports });
+  assert.deepEqual(r, { skipped: "empty generation" });
+  assert.equal(calls.scheduled.length, 1);
+  assert.equal(calls.scheduled[0].nextIso, "2026-09-25T12:45:00.000Z");
+});
+
+test("a not-yet-due tick does NOT push the schedule out", async () => {
+  const { ports, calls } = fakePorts({ nextEligibleAt: "2026-09-25T13:00:00.000Z" });
+  const r = await maybeCadencePost(fakeEnv(), { now: () => NOW, ports });
+  assert.ok(r && "skipped" in r && /waiting until/.test(r.skipped));
+  assert.equal(calls.scheduled.length, 0, "a waiting tick must leave the schedule alone");
+});
+
+test("a capped tick does NOT push the schedule out", async () => {
+  const seeds = [];
+  for (let i = 0; i < 18; i++) seeds.push({ text: `post ${i}`, postedAt: `2026-09-25T0${i % 10}:${i}:00.000Z` });
+  const { ports, calls } = fakePorts({ seeds });
+  await maybeCadencePost(fakeEnv(), { now: () => NOW, ports });
+  assert.equal(calls.scheduled.length, 0, "a capped tick must leave the schedule alone");
+});
+
+test("a throwing generator (empty wallet) backs off instead of spinning every tick", async () => {
+  const { fetchImpl } = mockFetch();
+  const { ports, calls } = fakePorts({ corpus: [corpusItem(1, "sleep")] });
+  ports.generateProse = async () => {
+    throw new Error("insufficient funds for x402 payment");
+  };
+  const r = await maybeCadencePost(fakeEnv({ X_POST_RETRY_MAX: "1", X_FAIL_BACKOFF_MINUTES: "60" }), { now: () => NOW, fetchImpl, ports });
+  assert.ok(r && "skipped" in r && /threw/.test(r.skipped), JSON.stringify(r));
+  assert.equal(calls.scheduled.length, 1);
+  assert.equal(calls.scheduled[0].nextIso, "2026-09-25T13:00:00.000Z");
+});

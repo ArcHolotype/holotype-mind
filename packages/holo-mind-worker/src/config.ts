@@ -41,6 +41,7 @@ export interface Env {
   X_GAP_MAX_MINUTES?: string; // longest random gap between two self-posts (default 120)
   X_BEHIND_GAP_MINUTES?: string; // gap used when the day is behind pace (default 20)
   X_POST_RETRY_MAX?: string; // extra attempts when a draft is dropped (default 2)
+  X_FAIL_BACKOFF_MINUTES?: string; // how long to wait after a FAILED attempt (default 60)
   X_CORPUS_TARGET?: string; // corpus size the ingest cron fills to (default 600)
   X_CORPUS_PER_TOPIC?: string; // per-topic corpus size ingest aims for (default 24)
   X_CORPUS_COOLDOWN_DAYS?: string; // days before an excerpt may be reused (default 14)
@@ -101,6 +102,7 @@ export interface RuntimeConfig {
   xGapMaxMinutes: number;
   xBehindGapMinutes: number;
   xPostRetryMax: number;
+  xFailBackoffMinutes: number;
   xCorpusTarget: number;
   xCorpusPerTopic: number;
   xCorpusCooldownDays: number;
@@ -143,6 +145,7 @@ export function readConfig(env: Env): RuntimeConfig {
     xGapMaxMinutes: Math.max(1, Math.floor(asNum(env.X_GAP_MAX_MINUTES, 120))),
     xBehindGapMinutes: Math.max(1, Math.floor(asNum(env.X_BEHIND_GAP_MINUTES, 20))),
     xPostRetryMax: Math.max(0, Math.floor(asNum(env.X_POST_RETRY_MAX, 2))),
+    xFailBackoffMinutes: Math.max(1, Math.floor(asNum(env.X_FAIL_BACKOFF_MINUTES, 60))),
     xCorpusTarget: Math.max(1, Math.floor(asNum(env.X_CORPUS_TARGET, 600))),
     xCorpusPerTopic: Math.max(1, Math.floor(asNum(env.X_CORPUS_PER_TOPIC, 24))),
     xCorpusCooldownDays: Math.max(0, asNum(env.X_CORPUS_COOLDOWN_DAYS, 14)),
