@@ -284,6 +284,45 @@ export async function sumReservedTodayCents(db: D1Database, dayPrefix: string): 
   return Number(r?.s ?? 0);
 }
 
+// ---- Mission counterparty blacklist (holo_mission_blacklist, migration 0009) ----
+// Best-effort containment for injection-shaped deliveries: a key is the lowercased claimant
+// string or a payout address. Rotation to a fresh key bypasses it, so the hard loss bound
+// remains the per-mission / per-day reward caps, not this table.
+export interface BlacklistRow {
+  id: number;
+  bkey: string;
+  kind: string;
+  reason: string | null;
+  ts: string;
+}
+
+export async function isBlacklisted(db: D1Database, bkey: string): Promise<boolean> {
+  const k = String(bkey ?? "").trim().toLowerCase();
+  if (!k) return false;
+  const r = await db.prepare(`SELECT 1 AS hit FROM holo_mission_blacklist WHERE bkey = ?1`).bind(k).first();
+  return !!r;
+}
+
+export async function addBlacklist(db: D1Database, bkey: string, kind: string, reason: string): Promise<void> {
+  const k = String(bkey ?? "").trim().toLowerCase();
+  if (!k) return;
+  await db
+    .prepare(
+      `INSERT OR IGNORE INTO holo_mission_blacklist (bkey, kind, reason, ts) VALUES (?1, ?2, ?3, ?4)`,
+    )
+    .bind(k, kind, reason.slice(0, 200), nowIso())
+    .run();
+}
+
+export async function listBlacklist(db: D1Database, limit = 100): Promise<BlacklistRow[]> {
+  const n = Math.min(500, Math.max(1, limit));
+  const { results } = await db
+    .prepare(`SELECT id, bkey, kind, reason, ts FROM holo_mission_blacklist ORDER BY id DESC LIMIT ?1`)
+    .bind(n)
+    .all<BlacklistRow>();
+  return results ?? [];
+}
+
 // ---- X (Twitter) self-broadcast log (holo_x_posts, migration 0007) ----
 // Backs the broadcast rail's code-enforced guards: the every-N-hours cadence and per-day
 // caps count from posted_at over SENT rows only (a candidate the gate dropped never posted,

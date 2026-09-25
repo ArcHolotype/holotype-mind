@@ -24,6 +24,7 @@ export interface Env {
   MODULATORY_TOPK: string; // how many modulatory neurons a thought maps onto; <=0 = whole layer
   NECTAR_MAX_PER_DAY?: string; // hard cap on new Nectar missions per UTC day (default 5)
   NECTAR_MAX_PER_MISSION_USD?: string; // hard cap on one mission's reward (default 1)
+  NECTAR_AUTO_SETTLE?: string; // "true" lets Holo review+pay a submitted delivery on its own (default false = creator-gated)
   // x402 buyer rail caps — SEPARATE from the vanilla Nectar caps above (different payment
   // path: EIP-3009 buyer signature vs a plain on-chain transfer). Both default to $1/purchase
   // and 5 purchases/UTC day.
@@ -93,6 +94,7 @@ export interface RuntimeConfig {
   modulatoryTopK: number;
   nectarMaxPerDay: number;
   nectarMaxPerMissionCents: number;
+  nectarAutoSettle: boolean;
   x402MaxPerPurchaseCents: number;
   x402MaxPerDay: number;
   x402MaxTimeoutSeconds: number;
@@ -138,6 +140,7 @@ export function readConfig(env: Env): RuntimeConfig {
     modulatoryTopK: Math.floor(asNum(env.MODULATORY_TOPK, 10)),
     nectarMaxPerDay: Math.max(1, Math.floor(asNum(env.NECTAR_MAX_PER_DAY, 5))),
     nectarMaxPerMissionCents: Math.max(1, Math.round(asNum(env.NECTAR_MAX_PER_MISSION_USD, 1) * 100)),
+    nectarAutoSettle: asBool(env.NECTAR_AUTO_SETTLE, false),
     x402MaxPerPurchaseCents: Math.max(1, Math.round(asNum(env.X402_MAX_PER_PURCHASE_USD, 1) * 100)),
     x402MaxPerDay: Math.max(1, Math.floor(asNum(env.X402_MAX_PER_DAY, 5))),
     x402MaxTimeoutSeconds: Math.max(1, Math.floor(asNum(env.X402_MAX_TIMEOUT_SECONDS, 300))),

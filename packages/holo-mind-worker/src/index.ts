@@ -19,6 +19,7 @@ import { walletIntegrityOk } from "./wallet.js";
 import { consoleHtml } from "./console.js";
 import { payApprovedMission, reconcileMission } from "./pay.js";
 import { maybeCadencePost, broadcastPublish, broadcastSettlement, maybeIngestCorpus, requiredByPace, isBehindPace } from "./broadcast.js";
+import { maybeAutonomousSettle } from "./settle.js";
 import { prepareX402Purchase, executeX402Purchase, getOrPrepareX402Purchase } from "./x402buy.js";
 import { listX402Purchases, reconcileX402Purchase, getPurchaseByKey } from "./x402guard.js";
 import {
@@ -40,6 +41,7 @@ import {
   setMissionTxHash,
   countMissionsSince,
   sumReservedTodayCents,
+  listBlacklist,
   recentXPosts,
   countXSelfSentToday,
   countXSentAllToday,
@@ -458,6 +460,18 @@ async function handleFetch(req: Request, env: Env): Promise<Response> {
   if (path === "/creator/missions" && method === "GET") {
     return json({ missions: await listMissions(env.DB, { limit: 100 }) });
   }
+  // POST /creator/missions/settle-now — run the autonomous review/pay pass on demand instead of
+  // waiting for the next cron tick. Same code path the cron uses (and same guards); used to
+  // verify a delivery decision. ?n= bounds how many pending missions this pass may handle.
+  if (path === "/creator/missions/settle-now" && method === "POST") {
+    const n = Math.min(5, Math.max(1, Number(url.searchParams.get("n") ?? "1")));
+    const rs = await maybeAutonomousSettle(env, { maxPerTick: n });
+    return json({ outcomes: rs });
+  }
+  // GET /creator/blacklist — counterparties refused by the injection scanner (audit view).
+  if (path === "/creator/blacklist" && method === "GET") {
+    return json({ blacklist: await listBlacklist(env.DB, 200) });
+  }
   const missionAction = path.match(/^\/creator\/missions\/(\d+)\/(claim|delivery|check|approve|cancel|pay|reconcile|x402-quote|x402-pay)$/);
   if (missionAction && method === "POST") {
     const id = Number(missionAction[1]);
@@ -728,6 +742,26 @@ async function handleScheduled(event: ScheduledEvent, env: Env, ctx: ExecutionCo
         else if (r && "reason" in r) console.log(`x broadcast ${r.status}: ${r.reason}`);
       })
       .catch((e: any) => console.error(`x broadcast error: ${e?.message ?? e}`)),
+  );
+  // Autonomous Nectar settlement. Self-guarding: inert unless NECTAR_AUTO_SETTLE is true and the
+  // wallet is armed. Reviews at most one submitted delivery per tick (blacklist -> deterministic
+  // injection scan -> model review -> the existing pay rail), so a burst cannot fan out. This is
+  // the one path that moves money without a creator click; it is bounded by the $1/mission and
+  // 5-missions/day reward caps. Logs stay secret-free (categories only, never the delivery text).
+  ctx.waitUntil(
+    maybeAutonomousSettle(env)
+      .then((rs) => {
+        for (const r of rs) {
+          if ("skipped" in r) {
+            console.log(`auto-settle skipped: ${r.skipped}`);
+            continue;
+          }
+          const stage = "stage" in r ? `/${r.stage}` : "";
+          const reason = "reason" in r && r.reason ? `: ${String(r.reason).slice(0, 120)}` : "";
+          console.log(`auto-settle id=${r.id} ${r.result}${stage}${reason}`);
+        }
+      })
+      .catch((e: any) => console.error(`auto-settle error: ${e?.message ?? e}`)),
   );
 }
 

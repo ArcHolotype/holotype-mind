@@ -69,6 +69,10 @@ PER_CALL_FEE_USD = "0.001"         # BlockRun x402 per-call chain fee, added to 
 PRIVATE_CONTEXT_N = "8"            # how many recent private (creator) messages to inject per beat.
 NECTAR_MAX_PER_DAY = "5"           # hard cap on new Nectar missions per UTC day (autonomous or creator).
 NECTAR_MAX_PER_MISSION_USD = "1"   # hard cap on ONE mission's reward (vanilla payout rail).
+NECTAR_AUTO_SETTLE = "true"        # GATE: "true" lets Holo review+pay a submitted delivery on its
+                                   # own (blacklist -> injection scan -> model review -> pay rail),
+                                   # bounded by the caps above. Flip to "false" + redeploy to put
+                                   # approve/pay back behind the creator console (kill switch).
 # x402 buyer rail caps — a SEPARATE payment path from the vanilla Nectar transfer above
 # (Holo signs an EIP-3009 authorization to buy a resource from an x402 seller). Same ceiling
 # the user set for both rails: $1 per purchase, 5 purchases per UTC day.
