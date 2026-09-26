@@ -1,6 +1,8 @@
 // Prompt construction + tolerant JSON parsing — a faithful TS port of the local
 // prototype's heartbeat.mjs helpers.
 
+import type { Intent } from "./policy.js";
+
 export interface Observed {
   tickIndex: number | null;
   temperature: number | null;
@@ -69,11 +71,12 @@ export function buildPrompt(
     ...recent,
     ...world,
     "",
-    "Respond with ONLY a JSON object, no prose, no code fences, exactly this shape:",
-    '{"narration":"<1-3 sentence first-person inner monologue about what you feel and intend; find a fresh angle each beat rather than echoing your recent thoughts>",',
-    ' "intent":{"type":"observe|narrate|rest|reflect|idle|publish_mission","reason":"<why>",',
+    "Respond with ONLY a JSON object, no prose, no code fences, exactly this shape (intent",
+    "FIRST, so a reply truncated by the token cap still carries it):",
+    '{"intent":{"type":"observe|narrate|rest|reflect|idle|publish_mission","reason":"<why>",',
     '  "title":"<short mission title>","description":"<what you need and why>",',
-    '  "criteria":["<checkable done-criterion>"],"rewardCents":<integer USD cents>}}',
+    '  "criteria":["<checkable done-criterion>"],"rewardCents":<integer USD cents>},',
+    ' "narration":"<1-3 sentence first-person inner monologue about what you feel and intend; find a fresh angle each beat rather than echoing your recent thoughts>"}',
     "The title/description/criteria/rewardCents fields are only used for publish_mission;",
     "omit them for other intents. publish_mission is a normal, welcome way to reach beyond",
     "yourself - you do not need a crisis to ask; curiosity is reason enough. From time to",
@@ -105,6 +108,46 @@ export function extractNarration(raw: string): string | null {
   }
   value = value.trim();
   return value || null;
+}
+
+// Salvage a publish_mission intent from a truncated or unbalanced JSON reply. Only the
+// mission intent is worth salvaging (every other type degrades safely to narrate), and a
+// partial intent without title/description/criteria returns null so the caller's disclosure
+// gate and caps remain the only path to creating a mission.
+export function extractIntent(raw: string): Intent | null {
+  const t = String(raw ?? "").replace(/```json|```/g, "");
+  if (!/"type"\s*:\s*"publish_mission"/.test(t)) return null;
+  const str = (key: string): string | null => {
+    const m = t.match(new RegExp(`"${key}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)"`));
+    if (!m) return null;
+    try {
+      return JSON.parse(`"${m[1]}"`);
+    } catch {
+      return m[1].replace(/\\n/g, " ").replace(/\\"/g, '"');
+    }
+  };
+  const title = str("title");
+  const description = str("description");
+  const cents = t.match(/"rewardCents"\s*:\s*(\d+)/);
+  const cm = t.match(/"criteria"\s*:\s*\[([^\]]*)\]/);
+  const criteria = cm
+    ? (cm[1].match(/"(?:[^"\\]|\\.)*"/g) ?? []).map((s) => {
+        try {
+          return JSON.parse(s);
+        } catch {
+          return s.slice(1, -1);
+        }
+      })
+    : [];
+  if (!title || !description || criteria.length === 0) return null;
+  return {
+    type: "publish_mission",
+    reason: "salvaged from truncated model output",
+    title,
+    description,
+    criteria,
+    rewardCents: cents ? Number(cents[1]) : 0,
+  };
 }
 
 // Build the prompt for a public X (Twitter) broadcast — Holo speaking on its own account.

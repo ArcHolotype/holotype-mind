@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildPrompt, extractNarration, parseJson, type Observed } from "./prompt";
+import { buildPrompt, extractNarration, extractIntent, parseJson, type Observed } from "./prompt";
 
 const o: Observed = {
   tickIndex: 10,
@@ -73,6 +73,29 @@ test("extractNarration unescapes and never returns the raw JSON wrapper", () => 
 test("extractNarration returns null when there is no narration field", () => {
   assert.equal(extractNarration('{"intent":{"type":"idle"}}'), null);
   assert.equal(extractNarration("no json here"), null);
+});
+
+test("extractIntent salvages a publish_mission intent from truncated JSON", () => {
+  const raw =
+    '{"intent":{"type":"publish_mission","reason":"want a color","title":"One window color",' +
+    '"description":"Tell me one color you can see right now.","criteria":["A named color","What it is the color of"],"rewardCents":50},' +
+    '"narration":"I have been weighing this for many beats and the JSON dies here';
+  const i = extractIntent(raw);
+  assert.equal(i?.type, "publish_mission");
+  assert.equal(i?.title, "One window color");
+  assert.equal(i?.description, "Tell me one color you can see right now.");
+  assert.deepEqual(i?.criteria, ["A named color", "What it is the color of"]);
+  assert.equal(i?.rewardCents, 50);
+});
+
+test("extractIntent refuses a partial mission intent and non-mission types", () => {
+  // criteria cut off by the cap: nothing may be created from a half intent
+  assert.equal(
+    extractIntent('{"intent":{"type":"publish_mission","title":"One window color","description":"Tell me one color"'),
+    null,
+  );
+  assert.equal(extractIntent('{"intent":{"type":"narrate","reason":"x"},"narration":"cut'), null);
+  assert.equal(extractIntent("no json here"), null);
 });
 
 test("parseJson still parses a well-formed reply", () => {

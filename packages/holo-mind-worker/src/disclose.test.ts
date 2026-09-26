@@ -74,13 +74,13 @@ test("shape bounds drop", () => {
   assert.equal(discloseGate(undefined).ok, false);
   assert.equal(discloseGate(42).ok, false);
   assert.equal(discloseGate("   ").ok, false);
-  assert.equal(discloseGate("x".repeat(1201)).ok, false);
-  assert.equal(discloseGate("x".repeat(1200)).ok, true);
+  assert.equal(discloseGate("x".repeat(4001)).ok, false);
+  assert.equal(discloseGate("x".repeat(4000)).ok, true);
 });
 
 test("length bound is configurable, so long-form posts do not move the narration cap", () => {
-  // The default bound is unchanged: the heartbeat's public narration is still capped at 1200.
-  assert.equal(discloseGate("x".repeat(1201)).ok, false);
+  // The default bound tracks the heartbeat's maxTokens headroom (4000 chars).
+  assert.equal(discloseGate("x".repeat(4001)).ok, false);
   // A caller (the X rail, on a verified account) may raise it for its own text only.
   assert.equal(discloseGate("x".repeat(1500), undefined, undefined, undefined, 1500).ok, true);
   assert.equal(discloseGate("x".repeat(1501), undefined, undefined, undefined, 1500).ok, false);

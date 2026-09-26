@@ -228,7 +228,7 @@ export async function generateBroadcastProse(
   const recentPosts = (await recentXPosts(env.DB, 10).catch(() => [])).map((r) => r.text);
   const recentRows = await recentDarkroom(env.DB, 5).catch(() => []);
   const recentNarrations = recentRows
-    .map((r: { narration?: unknown }) => String(r?.narration ?? "").trim())
+    .map((r: { narration?: unknown }) => String(r?.narration ?? "").trim().slice(0, 600))
     .filter(Boolean)
     .reverse();
   const prompt = buildBroadcastPrompt({

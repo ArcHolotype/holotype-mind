@@ -11,7 +11,7 @@
 import { LLMClient } from "@blockrun/llm";
 import { readConfig, type Env } from "./config.js";
 import { loadMasterKey } from "./crypto.js";
-import { buildPrompt, parseJson, extractNarration, type Observed } from "./prompt.js";
+import { buildPrompt, parseJson, extractNarration, extractIntent, type Observed } from "./prompt.js";
 import { decide, type Intent, type Verdict } from "./policy.js";
 import { syncTxHashes } from "./evidence.js";
 import { readUsdcBalances } from "./rpc.js";
@@ -284,12 +284,12 @@ export async function beat(env: Env, modelOverride?: string): Promise<BeatResult
     // elaborate narrations, and 300 was truncating the JSON mid-string so it failed to
     // parse. 600 leaves room for the narration plus the intent object to close cleanly,
     // and still bounds a beat far under PER_BEAT_CAP_USD.
-    { responseFormat: { type: "json_object" }, temperature: 0.8, maxTokens: 600 },
+    { responseFormat: { type: "json_object" }, temperature: 0.8, maxTokens: 1500 },
   );
   const raw = resp.choices?.[0]?.message?.content ?? "";
   const usage = resp.usage;
   const costUsd = Number(client.getSpending?.().totalUsd ?? 0);
-  // Per-beat cap is a post-hoc alarm: maxTokens=600 mathematically bounds any model's
+  // Per-beat cap is a post-hoc alarm: maxTokens=1500 mathematically bounds any model's
   // beat cost far under PER_BEAT_CAP_USD, so this should never trip — but if a future
   // model/price made it trip, we record it loudly rather than hide it.
   const costOverCap = costUsd >= cfg.perBeatCapUsd;
@@ -309,7 +309,10 @@ export async function beat(env: Env, modelOverride?: string): Promise<BeatResult
     // Truncated/malformed JSON: salvage the narration text itself rather than storing
     // the raw `{"narration":"...` fragment, which would otherwise surface publicly.
     narration = extractNarration(raw) || cleanRaw(raw);
-    intent = { type: "narrate", reason: `unparseable JSON (${parseErr})` };
+    // A mission intent cut off by the token cap must not vanish silently: salvage it when
+    // the fragment still carries title/description/criteria (the gates and caps at creation
+    // remain the only path to a real mission); otherwise degrade to narrate as before.
+    intent = extractIntent(raw) ?? { type: "narrate", reason: `unparseable JSON (${parseErr})` };
   }
   const verdict: Verdict = decide(intent);
 
