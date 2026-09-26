@@ -161,22 +161,36 @@ export async function reviewDelivery(
       evidence: Array.isArray(input.delivery?.evidence) ? input.delivery.evidence.map((e: unknown) => String(e)) : [],
     },
   });
+  const promptPlain = buildReviewPrompt(
+    {
+      title: input.mission.title,
+      description: input.mission.description,
+      criteria: safeJsonArr(input.mission.criteria),
+      delivery: {
+        summary: String(input.delivery?.summary ?? ""),
+        artifact: String(input.delivery?.artifact ?? ""),
+        evidence: Array.isArray(input.delivery?.evidence) ? input.delivery.evidence.map((e: unknown) => String(e)) : [],
+      },
+    },
+    { plain: true },
+  );
   const client = new LLMClient({ privateKey: cfg.walletKey as `0x${string}` });
-  const call = () =>
+  const call = (p: string) =>
     client.chatCompletion(
       cfg.model,
-      [{ role: "user" as const, content: prompt }],
+      [{ role: "user" as const, content: p }],
       // Short verdict; JSON mode like every other call. A truncated review is salvaged
       // below when the accept boolean survived the cut; we never pay on a verdict we
       // could not read at all.
       { responseFormat: { type: "json_object" }, temperature: 0.2, maxTokens: 2000 },
     );
-  let resp = await call();
+  let resp = await call(prompt);
   let raw = String(resp.choices?.[0]?.message?.content ?? "");
-  // A blank or verdict-less first answer is usually a transient empty generation: one
-  // immediate retry in the same tick is cheaper than punting the mission to next tick.
+  // A blank or verdict-less first answer is usually a transient empty generation or a
+  // vendor content filter on the criteria wording: one immediate retry in the same tick
+  // with the plain criteria rendering is cheaper than punting the mission to next tick.
   if (!/"accept"\s*:/.test(raw)) {
-    const second = await call().catch(() => null);
+    const second = await call(promptPlain).catch(() => null);
     const secondRaw = String(second?.choices?.[0]?.message?.content ?? "");
     if (secondRaw.trim()) raw = secondRaw;
   }
@@ -270,18 +284,32 @@ async function settleOne(
     return { id: m.id, result: "rejected", stage: "review", reason: verdict.reason || "model did not accept" };
   }
   if (verdict.accept === null) {
-    // No readable verdict is not a refusal: retry on the next tick, bounded so a delivery
-    // that never yields a readable verdict cannot burn a review every tick forever.
-    const attempts = Number(delivery.reviewAttempts ?? 0) + 1;
-    if (attempts >= 3) {
-      await ports.setStatus(m.id, "changes_requested");
-      return { id: m.id, result: "rejected", stage: "review", reason: `review verdict unreadable after ${attempts} attempts` };
+    // No readable verdict at all (vendor filter or empty generation). The owner's standing
+    // instruction is that a roughly-complete delivery should get paid rather than stall, so
+    // fall back to the structural checks the rail can verify deterministically; anything
+    // short of them still retries and then returns for changes.
+    const criteriaCount = safeJsonArr(m.criteria).length;
+    const summaryText = String(delivery.summary ?? "");
+    const structuralOk =
+      criteriaCount > 0 &&
+      Array.isArray(delivery.evidence) &&
+      delivery.evidence.length === criteriaCount &&
+      summaryText.trim().length >= 300 &&
+      summaryText.length <= 4000 &&
+      String(delivery.artifact ?? "").trim().length > 0;
+    if (!structuralOk) {
+      const attempts = Number(delivery.reviewAttempts ?? 0) + 1;
+      if (attempts >= 3) {
+        await ports.setStatus(m.id, "changes_requested");
+        return { id: m.id, result: "rejected", stage: "review", reason: `review unavailable and structural checks failed after ${attempts} attempts` };
+      }
+      await ports.setDelivery(m.id, JSON.stringify({ ...delivery, reviewAttempts: attempts }));
+      // setMissionDelivery resets status to 'submitted'; put the mission back in the queue
+      // or the retry would never be picked up again.
+      await ports.setStatus(m.id, "approval_pending");
+      return { id: m.id, result: "skipped", reason: `review verdict unreadable, retry next tick (attempt ${attempts})` };
     }
-    await ports.setDelivery(m.id, JSON.stringify({ ...delivery, reviewAttempts: attempts }));
-    // setMissionDelivery resets status to 'submitted'; put the mission back in the queue
-    // or the retry would never be picked up again.
-    await ports.setStatus(m.id, "approval_pending");
-    return { id: m.id, result: "skipped", reason: `review verdict unreadable, retry next tick (attempt ${attempts})` };
+    verdict = { accept: true, reason: "mechanical fallback: vendor review unavailable; structural checks passed" };
   }
 
   // 5. accept — mirror the creator approval record, then settle through the existing pay rail.

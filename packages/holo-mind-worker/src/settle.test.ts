@@ -305,3 +305,59 @@ test("auto-settle gives up after three unreadable verdicts and returns the missi
   const last = ports.calls.filter((c) => c.op === "status").pop();
   assert.equal(last.status, "changes_requested");
 });
+
+test("auto-settle pays via the mechanical fallback when the vendor review is unavailable", async () => {
+  const longSummary =
+    "A structured report of Arc mainnet activity over the last hour: transfer volume stayed moderate, " +
+    "three large movements stood out, and each is backed by a block reference in the evidence list below. " +
+    "Nothing here required judgement beyond reading the chain, and every criterion is answered in order. " +
+    "The observed window is stated at the top of the artifact for anyone who wants to re-check it.";
+  const m = mission({
+    delivery: JSON.stringify({
+      summary: longSummary,
+      artifact: "https://paste.example/abc123",
+      recipient: RECIPIENT,
+      evidence: ["observed block 123", "timestamp 12:00"],
+      rail: "vanilla",
+    }),
+  });
+  const ports = fakePorts([m]);
+  let paid = false;
+  const rs = await maybeAutonomousSettle(fakeEnv(), {
+    ports,
+    now: () => NOW,
+    review: async () => ({ accept: null, reason: "review verdict unreadable" }),
+    pay: async () => {
+      paid = true;
+      return { ok: true, txHash: "0xabc" };
+    },
+  });
+  assert.equal(rs[0] && "result" in rs[0] && rs[0].result, "paid");
+  assert.equal(paid, true);
+  assert.match(ports.calls.find((c) => c.op === "approval").json, /mechanical fallback/);
+});
+
+test("auto-settle does NOT use the mechanical fallback when evidence count mismatches criteria", async () => {
+  const m = mission({
+    delivery: JSON.stringify({
+      summary: "x".repeat(400),
+      artifact: "a",
+      recipient: RECIPIENT,
+      evidence: ["only one"],
+      rail: "vanilla",
+    }),
+  });
+  const ports = fakePorts([m]);
+  let paid = false;
+  const rs = await maybeAutonomousSettle(fakeEnv(), {
+    ports,
+    now: () => NOW,
+    review: async () => ({ accept: null, reason: "review verdict unreadable" }),
+    pay: async () => {
+      paid = true;
+      return { ok: true };
+    },
+  });
+  assert.equal(rs[0] && "result" in rs[0] && rs[0].result, "skipped");
+  assert.equal(paid, false);
+});
