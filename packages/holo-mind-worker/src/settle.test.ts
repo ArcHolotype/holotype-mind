@@ -72,6 +72,11 @@ function fakePorts(pending: MissionRow[], seedBlacklist: string[] = []) {
     async setApproval(id, json) {
       calls.push({ op: "approval", id, json });
     },
+    async setDelivery(id, json) {
+      const row = pending.find((p) => p.id === id);
+      if (row) row.delivery = json;
+      calls.push({ op: "delivery", id, json });
+    },
   };
   return ports;
 }
@@ -266,4 +271,34 @@ test("auto-settle handles at most one mission per tick by default", async () => 
     },
   });
   assert.deepEqual(paid, [7], "only the first pending mission is settled in one tick");
+});
+
+test("auto-settle retries (no pay, no reject) when the verdict is unreadable", async () => {
+  const ports = fakePorts([mission()]);
+  let payCalled = false;
+  const rs = await maybeAutonomousSettle(fakeEnv(), {
+    ports,
+    now: () => NOW,
+    review: async () => ({ accept: null, reason: "review verdict unreadable" }),
+    pay: async () => {
+      payCalled = true;
+      return { ok: true };
+    },
+  });
+  assert.equal(rs[0] && "result" in rs[0] && rs[0].result, "skipped");
+  assert.equal(payCalled, false);
+  const d = JSON.parse(ports.calls.find((c) => c.op === "delivery").json);
+  assert.equal(d.reviewAttempts, 1);
+});
+
+test("auto-settle gives up after three unreadable verdicts and returns the mission for changes", async () => {
+  const ports = fakePorts([mission()]);
+  const review = async () => ({ accept: null, reason: "review verdict unreadable" });
+  const pay = async () => ({ ok: true });
+  await maybeAutonomousSettle(fakeEnv(), { ports, now: () => NOW, review, pay });
+  await maybeAutonomousSettle(fakeEnv(), { ports, now: () => NOW, review, pay });
+  const r3 = await maybeAutonomousSettle(fakeEnv(), { ports, now: () => NOW, review, pay });
+  assert.equal(r3[0] && "result" in r3[0] && r3[0].result, "rejected");
+  const last = ports.calls.filter((c) => c.op === "status").pop();
+  assert.equal(last.status, "changes_requested");
 });

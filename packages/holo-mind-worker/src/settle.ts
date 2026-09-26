@@ -30,6 +30,7 @@ import {
   isBlacklisted,
   listMissions,
   setMissionApproval,
+  setMissionDelivery,
   setMissionStatus,
   type MissionRow,
 } from "./store.js";
@@ -149,7 +150,7 @@ export async function reviewDelivery(
   env: Env,
   cfg: RuntimeConfig,
   input: { mission: MissionRow; delivery: any },
-): Promise<{ accept: boolean; reason: string }> {
+): Promise<{ accept: boolean | null; reason: string }> {
   const prompt = buildReviewPrompt({
     title: input.mission.title,
     description: input.mission.description,
@@ -166,23 +167,27 @@ export async function reviewDelivery(
     [{ role: "user" as const, content: prompt }],
     // Short verdict; JSON mode like every other call. A truncated review is treated as a
     // refusal (fail-closed): we never pay on a verdict we could not fully read.
-    { responseFormat: { type: "json_object" }, temperature: 0.2, maxTokens: 600 },
+    { responseFormat: { type: "json_object" }, temperature: 0.2, maxTokens: 2000 },
   );
   const choice = resp.choices?.[0];
-  if (choice?.finish_reason === "length") return { accept: false, reason: "review truncated" };
   const raw = choice?.message?.content ?? "";
   try {
     const p = parseJson(raw);
     // accept is true ONLY on an explicit boolean true; anything else is a refusal.
     return { accept: p?.accept === true, reason: String(p?.reason ?? "").slice(0, 300) };
   } catch {
-    return { accept: false, reason: "unparseable review" };
+    // A verdict cut off by the token cap still carries its decision when the accept field
+    // landed before the cut. Salvage only an explicit boolean; never infer one. No verdict
+    // at all yields null so the caller can retry instead of mistaking silence for refusal.
+    const m = raw.match(/"accept"\s*:\s*(true|false)/);
+    if (m) return { accept: m[1] === "true", reason: "salvaged explicit verdict from truncated review" };
+    return { accept: null, reason: "review verdict unreadable" };
   }
 }
 
 export interface SettleDeps {
   now?: () => Date;
-  review?: (input: { mission: MissionRow; delivery: any }) => Promise<{ accept: boolean; reason: string }>;
+  review?: (input: { mission: MissionRow; delivery: any }) => Promise<{ accept: boolean | null; reason: string }>;
   pay?: (id: number) => Promise<{ ok: boolean; txHash?: string; reason?: string }>;
   maxPerTick?: number;
   ports?: Partial<SettlePorts>;
@@ -196,6 +201,7 @@ export interface SettlePorts {
   addBlacklist(key: string, kind: string, reason: string): Promise<void>;
   setStatus(id: number, status: string): Promise<void>;
   setApproval(id: number, approvalJson: string): Promise<void>;
+  setDelivery(id: number, deliveryJson: string): Promise<void>;
 }
 
 function d1Ports(db: D1Database): SettlePorts {
@@ -205,6 +211,7 @@ function d1Ports(db: D1Database): SettlePorts {
     addBlacklist: (key, kind, reason) => addBlacklist(db, key, kind, reason),
     setStatus: (id, status) => setMissionStatus(db, id, status),
     setApproval: (id, approvalJson) => setMissionApproval(db, id, approvalJson),
+    setDelivery: (id, deliveryJson) => setMissionDelivery(db, id, deliveryJson),
   };
 }
 
@@ -241,17 +248,28 @@ async function settleOne(
 
   // 4. model review. A throw is left pending (no status change) so a transient model/network
   //    hiccup retries next tick rather than being mistaken for a verdict; it never pays.
-  let verdict: { accept: boolean; reason: string };
+  let verdict: { accept: boolean | null; reason: string };
   try {
     verdict = await review({ mission: m, delivery });
   } catch (e) {
     return { id: m.id, result: "skipped", reason: `review threw: ${(e as Error)?.message ?? e}` };
   }
-  if (!verdict.accept) {
+  if (verdict.accept === false) {
     // Honest but insufficient work: send it back for changes (the agent may resubmit, which
     // returns it here). Not blacklisted — only injection is.
     await ports.setStatus(m.id, "changes_requested");
     return { id: m.id, result: "rejected", stage: "review", reason: verdict.reason || "model did not accept" };
+  }
+  if (verdict.accept === null) {
+    // No readable verdict is not a refusal: retry on the next tick, bounded so a delivery
+    // that never yields a readable verdict cannot burn a review every tick forever.
+    const attempts = Number(delivery.reviewAttempts ?? 0) + 1;
+    if (attempts >= 3) {
+      await ports.setStatus(m.id, "changes_requested");
+      return { id: m.id, result: "rejected", stage: "review", reason: `review verdict unreadable after ${attempts} attempts` };
+    }
+    await ports.setDelivery(m.id, JSON.stringify({ ...delivery, reviewAttempts: attempts }));
+    return { id: m.id, result: "skipped", reason: `review verdict unreadable, retry next tick (attempt ${attempts})` };
   }
 
   // 5. accept — mirror the creator approval record, then settle through the existing pay rail.
