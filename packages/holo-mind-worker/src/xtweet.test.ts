@@ -478,3 +478,40 @@ test("non-2xx (502 saved-not-published) is recorded failed", async () => {
   assert.equal(r.status, "failed");
   assert.equal(store.rows[0].status, "failed");
 });
+
+test("event broadcast is exempt from the minimum-gap backstop (proof must not be dropped for pacing)", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  // A cadence post went out 5 minutes ago — inside the 20min gap, so a cadence post would drop.
+  const store = fakeStore([{ text: "earlier post", postedAt: "2026-09-25T11:55:00.000Z" }]);
+  const cadence = await postTweet(cfg(), fakeStore([{ text: "earlier post", postedAt: "2026-09-25T11:55:00.000Z" }]), { prose: "a fresh cadence thought", trigger: "cadence" }, { fetchImpl, now });
+  assert.equal(cadence.posted, false);
+  assert.match(cadence.reason, /gap:/); // cadence is still paced
+  // The settlement event, 5 minutes after the last post, still goes out.
+  const event = await postTweet(cfg(), store, { prose: "The nectar was collected. I paid $0.45 on Arc for mission #7.", suffix: "tx 0xabc123", trigger: "settlement", ref: "mission-7" }, { fetchImpl, now });
+  assert.equal(event.posted, true, JSON.stringify(event));
+  assert.equal(calls.length, 1);
+});
+
+test("event broadcast is exempt from the near-similarity gate (templates share factual wording)", async () => {
+  const { fetchImpl } = mockFetch(201, PUBLISHED);
+  const prev = "The nectar was collected. I paid $0.40 on Arc for mission #6 via on-chain transfer.";
+  const store = fakeStore([{ text: `${prev}\n\n- Holo`, postedAt: "2026-09-25T08:00:00.000Z" }]);
+  // A cadence post near-identical to a recent one would be dropped as too similar...
+  const cadence = await postTweet(cfg(), fakeStore([{ text: `${prev}\n\n- Holo`, postedAt: "2026-09-25T08:00:00.000Z" }]), { prose: "The nectar was collected. I paid $0.40 on Arc for mission #6 via on-chain transfer again", trigger: "cadence" }, { fetchImpl, now });
+  assert.equal(cadence.posted, false);
+  assert.match(cadence.reason, /too similar/);
+  // ...but the next settlement event, though templated alike, still goes out (unique tx suffix).
+  const event = await postTweet(cfg(), store, { prose: "The nectar was collected. I paid $0.60 on Arc for mission #5 via on-chain transfer.", suffix: "tx 0xdef456", trigger: "settlement", ref: "mission-5" }, { fetchImpl, now });
+  assert.equal(event.posted, true, JSON.stringify(event));
+});
+
+test("event broadcast still respects the global daily plan cap", async () => {
+  const { fetchImpl, calls } = mockFetch(201, PUBLISHED);
+  const seeds: Seed[] = [];
+  for (let i = 0; i < 20; i++) seeds.push({ text: `post ${i}`, postedAt: `2026-09-25T0${i % 10}:${i}:00.000Z` });
+  const store = fakeStore(seeds);
+  const r = await postTweet(cfg(), store, { prose: "The nectar was collected. I paid $0.45 on Arc for mission #7.", trigger: "settlement", ref: "mission-7" }, { fetchImpl, now });
+  assert.equal(r.posted, false);
+  assert.match(r.reason, /daily plan cap/);
+  assert.equal(calls.length, 0);
+});

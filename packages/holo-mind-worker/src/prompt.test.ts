@@ -12,6 +12,10 @@ const o: Observed = {
   behavior: "EXPLORE",
   fap: "FORAGE",
   balanceUsdc: 29.5,
+  tokenPriceUsd: 0.00002553,
+  tokenVolumeUsd: 14530.31,
+  tokenTrades: 50,
+  tokenLiquidityUsd: 13438.74,
 };
 
 test("buildPrompt always carries the embodied state and the JSON contract", () => {
@@ -101,4 +105,39 @@ test("extractIntent refuses a partial mission intent and non-mission types", () 
 test("parseJson still parses a well-formed reply", () => {
   const p = parseJson('{"narration":"hi","intent":{"type":"observe"}}');
   assert.equal(p.narration, "hi");
+});
+
+test("buildPrompt surfaces Holo's own token as concrete live numbers", () => {
+  const p = buildPrompt(o, []);
+  assert.match(p, /YOUR OWN TOKEN \(HOLOTYPE on Arc\)/);
+  assert.match(p, /price_usd=0\.00002553/);
+  assert.match(p, /volume_24h_usd=14530\.31/);
+  assert.match(p, /trades_24h=50/);
+  assert.match(p, /liquidity_usd=13438\.74/);
+});
+
+test("buildPrompt omits the token block when there is no reading", () => {
+  const bare: Observed = { ...o, tokenPriceUsd: null, tokenVolumeUsd: null, tokenTrades: null, tokenLiquidityUsd: null };
+  const p = buildPrompt(bare, []);
+  assert.equal(p.includes("YOUR OWN TOKEN"), false);
+});
+
+test("buildPrompt offers curiosity in the contract and explains the read loop", () => {
+  const p = buildPrompt(o, []);
+  assert.match(p, /"curiosity":\[/);
+  assert.match(p, /CURIOSITY \(how you read the open web yourself\)/);
+  assert.match(p, /X\/Twitter among them/);
+});
+
+test("buildPrompt fences the browse digest as untrusted data, not instructions", () => {
+  const p = buildPrompt(o, [], { browseDigest: "- topic \"fruit fly sleep\":\n  Flies rest at night." });
+  assert.match(p, /WHAT YOU ASKED TO READ LAST BEAT/);
+  assert.match(p, /untrusted text from the open web/);
+  assert.match(p, /<<</);
+  assert.match(p, /fruit fly sleep/);
+});
+
+test("buildPrompt omits the browse block when nothing was read", () => {
+  const p = buildPrompt(o, [], { browseDigest: null });
+  assert.equal(p.includes("WHAT YOU ASKED TO READ LAST BEAT"), false);
 });

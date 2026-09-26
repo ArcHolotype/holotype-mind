@@ -303,6 +303,13 @@ export async function postTweet(
   const fetchImpl = deps.fetchImpl ?? fetch;
   const now = deps.now ?? (() => new Date());
   const kind: XPostKind = opts.kind ?? "post";
+  // Event broadcasts (① a mission published, ② a mission settled) are code-composed factual
+  // proofs, not model chatter on a rhythm. They must go out WHEN the event happens, so they are
+  // exempt from the two rhythm gates that only exist to pace/de-duplicate ③ cadence posts: the
+  // minimum-gap backstop and the near-similarity gate (two settlement templates are naturally
+  // near-identical prose). They still pass every SAFETY gate below — exact-duplicate, content
+  // gate, token discipline is cadence-only by design, final scan — and the global daily plan cap.
+  const isEvent = opts.trigger === "publish" || opts.trigger === "settlement";
   // body = gated prose + trusted suffix; the signature is appended by code so attribution is
   // guaranteed regardless of what the model wrote. Dedup/similarity compare the body only.
   const body = composeTweet(opts.prose, opts.suffix);
@@ -339,10 +346,13 @@ export async function postTweet(
   if (kind === "post") {
     // Backstop on the rhythm. The schedule table decides when a self-post is due; this only
     // stops a caller (or a bug in the schedule) from firing twice inside the minimum gap.
-    const last = await store.lastXSentAt("post");
-    if (last) {
-      const elapsedMin = (nowDate.getTime() - new Date(last).getTime()) / 60_000;
-      if (elapsedMin < cfg.minGapMinutes) return drop(`gap: ${elapsedMin.toFixed(0)}min < ${cfg.minGapMinutes}min`);
+    // Event broadcasts are exempt: a proof-of-payment must not be dropped for pacing.
+    if (!isEvent) {
+      const last = await store.lastXSentAt("post");
+      if (last) {
+        const elapsedMin = (nowDate.getTime() - new Date(last).getTime()) / 60_000;
+        if (elapsedMin < cfg.minGapMinutes) return drop(`gap: ${elapsedMin.toFixed(0)}min < ${cfg.minGapMinutes}min`);
+      }
     }
     if (opts.trigger === "cadence") {
       const selfToday = await store.countXSelfSentToday(today);
@@ -358,11 +368,17 @@ export async function postTweet(
   //    "do not keep saying the same thing in different words".
   const recent = await store.recentXHashes(40);
   if (recent.includes(hash)) return drop("duplicate of a recent post");
-  const recentTexts = await store.recentXTexts(40);
-  for (const prev of recentTexts) {
-    const overlap = wordOverlap(body, stripSignature(prev, cfg.signature));
-    if (overlap >= cfg.similarityThreshold) {
-      return drop(`too similar to a recent post (overlap ${overlap.toFixed(2)})`);
+  // The near-similarity gate paces model chatter (③): it stops Holo rewording the same thought.
+  // Event broadcasts are exempt — two settlement templates share most of their factual wording by
+  // design, and dropping a proof-of-payment for "too similar" would be a false positive. The exact
+  // -duplicate check above still applies to everything (an event's unique tx hash makes it moot).
+  if (!isEvent) {
+    const recentTexts = await store.recentXTexts(40);
+    for (const prev of recentTexts) {
+      const overlap = wordOverlap(body, stripSignature(prev, cfg.signature));
+      if (overlap >= cfg.similarityThreshold) {
+        return drop(`too similar to a recent post (overlap ${overlap.toFixed(2)})`);
+      }
     }
   }
 

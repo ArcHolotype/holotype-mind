@@ -92,7 +92,9 @@ X_BROADCAST_ENABLED = "true"       # GATE: broadcast kill switch. ARMED 2026-09-
 # --- the pace it needs. 20/day is the OpenTweet Pro plan limit and it is ONE bucket shared by
 # --- every kind of post, so self-posts stop at 18 and leave room for mission event broadcasts.
 X_POST_MIN_PER_DAY = "12"          # floor: self-posts the rail must reach per UTC day.
-X_POST_MAX_PER_DAY = "18"          # ceiling on self-posts per UTC day.
+X_POST_MAX_PER_DAY = "14"          # ceiling on self-posts per UTC day. Leaves 6 of the 20-post
+                                   # plan bucket reserved for event broadcasts (publish/settlement),
+                                   # so a proof-of-payment tweet is never blocked by the daily cap.
 X_GLOBAL_MAX_PER_DAY = "20"        # ceiling on ALL kinds per UTC day = the plan's hard limit.
 X_GAP_MIN_MINUTES = "40"           # shortest random gap between two self-posts.
 X_GAP_MAX_MINUTES = "120"          # longest random gap between two self-posts.
@@ -105,8 +107,8 @@ X_FAIL_BACKOFF_MINUTES = "60"      # wait this long after a FAILED attempt. With
 # --- Post shape. The account is verified, so long-form is allowed; 280 was a self-imposed cap.
 # --- The completion budget must fit the model's reasoning PLUS the full post, or it truncates
 # --- to empty (the cause of the missed 08:15Z tick). Both are tunable without a code change.
-X_POST_MAX_CHARS = "1500"          # character bound for one self-post (prose; the rail signs it).
-X_BROADCAST_MAX_TOKENS = "3000"    # completion budget for one self-post generation.
+X_POST_MAX_CHARS = "4000"          # character bound for one self-post (prose; the rail signs it).
+X_BROADCAST_MAX_TOKENS = "8000"    # completion budget for one self-post generation.
 # --- Reading material: vetted Drosophila neuroscience excerpts, fetched by the slow cron from
 # --- a fixed whitelist (Europe PMC / Wikipedia / PLOS / OpenAlex) and stored in holo_x_corpus.
 # --- The posting path reads only that table; it never touches the network.

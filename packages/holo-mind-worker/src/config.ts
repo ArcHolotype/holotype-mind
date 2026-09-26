@@ -36,7 +36,7 @@ export interface Env {
   // default: with X_BROADCAST_ENABLED != "true" OR no OPENTWEET_API_KEY, nothing is posted.
   X_BROADCAST_ENABLED?: string; // "true" | "false" — broadcast kill switch (default false)
   X_POST_MIN_PER_DAY?: string; // floor: self-posts the rail must reach per UTC day (default 12)
-  X_POST_MAX_PER_DAY?: string; // ceiling on self-posts per UTC day (default 18)
+  X_POST_MAX_PER_DAY?: string; // ceiling on self-posts per UTC day (default 14; leaves room in the 20-post plan bucket for event broadcasts)
   X_GLOBAL_MAX_PER_DAY?: string; // ceiling on ALL kinds per UTC day (default 20 = the plan limit)
   X_GAP_MIN_MINUTES?: string; // shortest random gap between two self-posts (default 40)
   X_GAP_MAX_MINUTES?: string; // longest random gap between two self-posts (default 120)
@@ -49,11 +49,19 @@ export interface Env {
   X_CORPUS_TOPIC_HOURS?: string; // hours before a topic may be used again (default 24)
   X_CORPUS_TOPICS_PER_RUN?: string; // topics fetched per ingest run (default 2; worst case 16 subrequests)
   X_REPLY_MAX_PER_DAY?: string; // hard cap on replies per UTC day (default 12)
-  X_POST_MAX_CHARS?: string; // character bound for one self-post (default 1500; the account is verified, so long-form is allowed)
-  X_BROADCAST_MAX_TOKENS?: string; // completion budget for one self-post generation (default 3000; must fit the model's reasoning plus the post)
+  X_POST_MAX_CHARS?: string; // character bound for one self-post (default 4000; the account is verified, so long-form is allowed)
+  X_BROADCAST_MAX_TOKENS?: string; // completion budget for one self-post generation (default 8000; must fit the model's reasoning plus the post)
   X_OFFICIAL_HANDLE?: string; // the account Holo runs / may read (default @ArcHolotype)
   TOKEN_CA?: string; // public token contract address, allowed in public text alongside the wallet
   OPENTWEET_BASE_URL?: string; // OpenTweet base url (default https://opentweet.io); overridable for a local dry-run mock
+
+  // Autonomous browsing (read-only). Holo names URLs/topics it is curious about; the worker
+  // fetches a small, hard-bounded text digest for the NEXT beat. Every cap is a wall so a slow
+  // or hostile page can never block, slow, or break a heartbeat. Kill switch = BROWSE_ENABLED.
+  BROWSE_ENABLED?: string; // default true; flip false to stop all browsing without a redeploy of prompt copy
+  BROWSE_MAX_ITEMS?: string; // max curiosity entries fetched per beat (default 3)
+  BROWSE_TOTAL_TIMEOUT_MS?: string; // wall-clock ceiling for the whole browse step (default 8000)
+  BROWSE_MAX_CHARS_PER_ITEM?: string; // text kept per fetched item (default 1200)
 
   // Public on-chain read surface (all public info; the wallet address is Holo's own)
   PUBLIC_WALLET_ADDRESS?: string;
@@ -118,6 +126,10 @@ export interface RuntimeConfig {
   xOfficialHandle: string;
   tokenCa: string;
   openTweetBaseUrl: string;
+  browseEnabled: boolean;
+  browseMaxItems: number;
+  browseTotalTimeoutMs: number;
+  browseMaxCharsPerItem: number;
   openTweetApiKey?: string;
   walletKey?: string;
   masterKeyHex?: string;
@@ -146,7 +158,7 @@ export function readConfig(env: Env): RuntimeConfig {
     x402MaxTimeoutSeconds: Math.max(1, Math.floor(asNum(env.X402_MAX_TIMEOUT_SECONDS, 300))),
     xBroadcastEnabled: asBool(env.X_BROADCAST_ENABLED, false),
     xPostMinPerDay: Math.max(0, Math.floor(asNum(env.X_POST_MIN_PER_DAY, 12))),
-    xPostMaxPerDay: Math.max(1, Math.floor(asNum(env.X_POST_MAX_PER_DAY, 18))),
+    xPostMaxPerDay: Math.max(1, Math.floor(asNum(env.X_POST_MAX_PER_DAY, 14))),
     xGlobalMaxPerDay: Math.max(1, Math.floor(asNum(env.X_GLOBAL_MAX_PER_DAY, 20))),
     xGapMinMinutes: Math.max(1, Math.floor(asNum(env.X_GAP_MIN_MINUTES, 40))),
     xGapMaxMinutes: Math.max(1, Math.floor(asNum(env.X_GAP_MAX_MINUTES, 120))),
@@ -159,11 +171,15 @@ export function readConfig(env: Env): RuntimeConfig {
     xCorpusTopicHours: Math.max(0, asNum(env.X_CORPUS_TOPIC_HOURS, 24)),
     xCorpusTopicsPerRun: Math.max(1, Math.floor(asNum(env.X_CORPUS_TOPICS_PER_RUN, 2))),
     xReplyMaxPerDay: Math.max(0, Math.floor(asNum(env.X_REPLY_MAX_PER_DAY, 12))),
-    xPostMaxChars: Math.max(1, Math.floor(asNum(env.X_POST_MAX_CHARS, 1500))),
-    xBroadcastMaxTokens: Math.max(1, Math.floor(asNum(env.X_BROADCAST_MAX_TOKENS, 3000))),
+    xPostMaxChars: Math.max(1, Math.floor(asNum(env.X_POST_MAX_CHARS, 4000))),
+    xBroadcastMaxTokens: Math.max(1, Math.floor(asNum(env.X_BROADCAST_MAX_TOKENS, 8000))),
     xOfficialHandle: (env.X_OFFICIAL_HANDLE ?? "@ArcHolotype").trim(),
     tokenCa: (env.TOKEN_CA ?? "0xECa7C682fbb32EC4F1B3bBb28791Fe184D3552A8").trim().toLowerCase(),
     openTweetBaseUrl: (env.OPENTWEET_BASE_URL ?? "https://opentweet.io").trim(),
+    browseEnabled: asBool(env.BROWSE_ENABLED, true),
+    browseMaxItems: Math.max(0, Math.floor(asNum(env.BROWSE_MAX_ITEMS, 3))),
+    browseTotalTimeoutMs: Math.max(500, Math.floor(asNum(env.BROWSE_TOTAL_TIMEOUT_MS, 8000))),
+    browseMaxCharsPerItem: Math.max(100, Math.floor(asNum(env.BROWSE_MAX_CHARS_PER_ITEM, 1200))),
     openTweetApiKey: env.OPENTWEET_API_KEY?.trim() || undefined,
     walletKey: env.HOLO_WALLET_KEY?.trim() || undefined,
     masterKeyHex: env.HOLO_MASTER_KEY?.trim() || undefined,

@@ -16,6 +16,7 @@ import { decide, type Intent, type Verdict } from "./policy.js";
 import { syncTxHashes } from "./evidence.js";
 import { readUsdcBalances } from "./rpc.js";
 import { readWorldDigest } from "./sensors.js";
+import { parseCuriosity, readBrowseDigest } from "./browse.js";
 import { broadcastPublish } from "./broadcast.js";
 import {
   recordDarkroom,
@@ -51,6 +52,9 @@ export interface BeatResult {
   neuronCount?: number | null; // total neurons in the connectome snapshot
 }
 
+const numOrNull = (v: unknown): number | null =>
+  typeof v === "number" && Number.isFinite(v) ? v : null;
+
 // Read Holo's embodied state off the BODY worker (read-only, no money).
 // Prefers the in-platform service binding (env.BODY) over a public HTTP fetch:
 // worker→worker subrequests to *.workers.dev were returning 404 even though the
@@ -76,6 +80,13 @@ async function observe(env: Env, baseUrl: string): Promise<Observed> {
     behavior: top(c.states)?.[0] ?? null,
     fap: top(c.faps)?.[0] ?? null,
     balanceUsdc: s.economy?.meanBalanceUsdc ?? null,
+    // Holo's own token, as concrete live numbers. The body already samples these from
+    // DexScreener for the temperature; we surface the raw figures too so the brain can
+    // perceive its own economy, not just a scalar mood. volume=value, trades=breadth.
+    tokenPriceUsd: numOrNull(s.market?.priceUsd),
+    tokenVolumeUsd: numOrNull(s.market?.value),
+    tokenTrades: numOrNull(s.market?.breadth),
+    tokenLiquidityUsd: numOrNull(s.market?.liquidityUsd),
   };
 }
 
@@ -270,12 +281,28 @@ export async function beat(env: Env, modelOverride?: string): Promise<BeatResult
   // untrusted data in the prompt. Optional and cached; null simply omits the section.
   const worldDigest = await readWorldDigest();
 
+  // Autonomous browsing: read what Holo asked for on the PREVIOUS beat (its curiosity rode
+  // along in that beat's persisted intent_json, which recentRows[0] already carries — no new
+  // query), fetch a hard-bounded text digest, and fence it into this beat's prompt. Gated by
+  // BROWSE_ENABLED. Best-effort and time-boxed: readBrowseDigest never throws and returns null
+  // on any failure/timeout, so browsing can NEVER block, slow, or break the beat or the rail.
+  let browseDigest: string | null = null;
+  if (cfg.browseEnabled && cfg.browseMaxItems > 0) {
+    const curiosity = parseCuriosity(recentRows[0]?.intent_json ?? null, cfg.browseMaxItems);
+    browseDigest = await readBrowseDigest(curiosity, {
+      maxItems: cfg.browseMaxItems,
+      totalTimeoutMs: cfg.browseTotalTimeoutMs,
+      maxCharsPerItem: cfg.browseMaxCharsPerItem,
+    }).catch(() => null);
+  }
+
   // One LLM call. A FRESH client per beat makes getSpending().totalUsd this beat's cost.
   const client = new LLMClient({ privateKey: cfg.walletKey as `0x${string}` });
   const prompt = buildPrompt(o, privateLines, {
     maxMissionCents: cfg.nectarMaxPerMissionCents,
     recentNarrations,
     worldDigest,
+    browseDigest,
   });
   const resp = await client.chatCompletion(
     model,
