@@ -24,8 +24,8 @@
 
 import { LLMClient } from "@blockrun/llm";
 import { readConfig, type Env, type RuntimeConfig } from "./config.js";
-import { buildBroadcastPrompt, parseJson } from "./prompt.js";
-import { secretValues } from "./disclose.js";
+import { buildBroadcastPrompt, buildSettlementFeelingPrompt, parseJson } from "./prompt.js";
+import { discloseGate, secretValues } from "./disclose.js";
 import {
   buildPickQuery,
   ingestCorpus,
@@ -104,13 +104,32 @@ export function composePublishTweet(m: MissionRow): { prose: string; suffix: str
 // ② settlement broadcast — deterministic template + the on-chain proof as a trusted suffix.
 // The tx hash and evidence link live in the suffix (code-controlled), never in the gated prose,
 // so the 64-hex hash and the URL never trip the prose gate yet still ride along publicly.
-export function composeSettlementTweet(m: MissionRow, txHash: string): { prose: string; suffix: string } {
+export function composeSettlementTweet(m: MissionRow, txHash: string, feeling?: string | null): { prose: string; suffix: string } {
   const delivery = parseDelivery(m);
   const rail = delivery.rail === "x402" ? "x402 (EIP-3009)" : "on-chain transfer";
   const got = (delivery.summary ?? "the completed work").trim().slice(0, 60);
-  const prose = `The nectar was collected. I paid ${usd(m.reward_cents)} on Arc for mission #${m.id} via ${rail} and got: ${got}.`;
+  let prose = `The nectar was collected. I paid ${usd(m.reward_cents)} on Arc for mission #${m.id} via ${rail} and got: ${got}.`;
+  if (feeling) prose += `\n\n${feeling}`;
   const suffix = `tx ${txHash} · https://holotype.online/api/missions/${m.id}/evidence`;
   return { prose, suffix };
+}
+
+// One short line in Holo's own voice about receiving the work. Best-effort by construction:
+// no wallet key, a truncated reply, or a gate drop all degrade to null and the settlement
+// broadcast still goes out with facts + tx hash + evidence link.
+async function generateSettlementFeeling(env: Env, cfg: RuntimeConfig, m: MissionRow): Promise<string | null> {
+  if (!cfg.walletKey) return null;
+  const prompt = buildSettlementFeelingPrompt(m, String(parseDelivery(m).summary ?? ""));
+  const client = new LLMClient({ privateKey: cfg.walletKey as `0x${string}` });
+  const resp = await client.chatCompletion(cfg.model, [{ role: "user" as const, content: prompt }], {
+    temperature: 0.7,
+    maxTokens: 200,
+  });
+  const choice = resp.choices?.[0];
+  if (choice?.finish_reason === "length") return null;
+  const text = cleanTweetText(String(choice?.message?.content ?? "").slice(0, 400));
+  if (!text) return null;
+  return discloseGate(text, cfg.publicWallet, secretValues(cfg)).ok ? text : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -412,14 +431,41 @@ export async function broadcastPublish(env: Env, missionId: number, deps: XTweet
 }
 
 // ② fire after a mission settles on-chain. Best-effort: never throws into the payment flow.
-export async function broadcastSettlement(env: Env, missionId: number, txHash: string, deps: XTweetDeps = {}): Promise<BroadcastOutcome> {
+export async function broadcastSettlement(
+  env: Env,
+  missionId: number,
+  txHash: string,
+  deps: XTweetDeps & {
+    mission?: MissionRow | null;
+    store?: XPostStore;
+    feeling?: string | null;
+    feelingImpl?: (m: MissionRow) => Promise<string | null>;
+  } = {},
+): Promise<BroadcastOutcome> {
   try {
     const cfg = readConfig(env);
     if (!cfg.xBroadcastEnabled || !cfg.openTweetApiKey || !txHash) return null; // inert
-    const m = await getMission(env.DB, missionId);
+    const m = deps.mission !== undefined ? deps.mission : await getMission(env.DB, missionId);
     if (!m) return null;
-    const { prose, suffix } = composeSettlementTweet(m, txHash);
-    return await postTweet(broadcastConfig(cfg), xStore(env.DB), { prose, suffix, trigger: "settlement", ref: `mission-${missionId}` }, deps);
+    let rawFeeling: string | null = null;
+    try {
+      if (deps.feeling !== undefined) rawFeeling = deps.feeling;
+      else if (deps.feelingImpl) rawFeeling = await deps.feelingImpl(m);
+      else rawFeeling = await generateSettlementFeeling(env, cfg, m);
+    } catch (e) {
+      console.error("settlement feeling failed:", (e as Error).message);
+      rawFeeling = null;
+    }
+    const cleanedFeeling = rawFeeling ? cleanTweetText(rawFeeling) : "";
+    const feeling =
+      cleanedFeeling && discloseGate(cleanedFeeling, cfg.publicWallet, secretValues(cfg)).ok ? cleanedFeeling : null;
+    const { prose, suffix } = composeSettlementTweet(m, txHash, feeling);
+    return await postTweet(
+      broadcastConfig(cfg),
+      deps.store ?? xStore(env.DB),
+      { prose, suffix, trigger: "settlement", ref: `mission-${missionId}` },
+      deps,
+    );
   } catch (e) {
     console.error("broadcastSettlement failed:", (e as Error).message);
     return null;

@@ -201,6 +201,66 @@ test("composeSettlementTweet defaults to on-chain transfer for a vanilla deliver
   assert.match(prose, /on-chain transfer/);
 });
 
+test("composeSettlementTweet carries an optional feeling line after the facts", () => {
+  const m = mission({ delivery: JSON.stringify({ summary: "a color report", rail: "vanilla" }) });
+  const withFeeling = composeSettlementTweet(m, "0xabc", "My palette has three words now, and the third is theirs.");
+  assert.match(withFeeling.prose, /nectar was collected/);
+  assert.match(withFeeling.prose, /a color report/);
+  assert.match(withFeeling.prose, /My palette has three words now/);
+  const without = composeSettlementTweet(m, "0xabc", null);
+  assert.doesNotMatch(without.prose, /My palette has three words/);
+});
+
+test("broadcastSettlement posts facts + feeling + tx/evidence suffix, signed", async () => {
+  const { fetchImpl, calls } = mockFetch();
+  const m = mission({ delivery: JSON.stringify({ summary: "a color report", rail: "vanilla" }) });
+  const r = await broadcastSettlement(fakeEnv(), 7, "0xabc", {
+    fetchImpl,
+    mission: m,
+    store: fakeStore(),
+    feeling: "Holding it, the pane looks wider than it did this morning.",
+  });
+  assert.ok(r && "posted" in r && r.posted, JSON.stringify(r));
+  const text = calls[0].body.text;
+  assert.match(text, /nectar was collected/);
+  assert.match(text, /a color report/);
+  assert.match(text, /Holding it, the pane looks wider than it did this morning\./);
+  assert.match(text, /tx 0xabc/);
+  assert.match(text, /missions\/7\/evidence/);
+  assert.ok(text.endsWith("- Holo"));
+});
+
+test("broadcastSettlement still posts facts-only when the feeling generator throws", async () => {
+  const { fetchImpl, calls } = mockFetch();
+  const m = mission({ delivery: JSON.stringify({ summary: "done", rail: "vanilla" }) });
+  const r = await broadcastSettlement(fakeEnv(), 7, "0xabc", {
+    fetchImpl,
+    mission: m,
+    store: fakeStore(),
+    feelingImpl: async () => {
+      throw new Error("boom");
+    },
+  });
+  assert.ok(r && "posted" in r && r.posted, JSON.stringify(r));
+  assert.match(calls[0].body.text, /nectar was collected/);
+  assert.match(calls[0].body.text, /tx 0xabc/);
+});
+
+test("broadcastSettlement drops a feeling that trips the disclosure gate, keeping facts", async () => {
+  const { fetchImpl, calls } = mockFetch();
+  const m = mission({ delivery: JSON.stringify({ summary: "done", rail: "vanilla" }) });
+  const r = await broadcastSettlement(fakeEnv(), 7, "0xabc", {
+    fetchImpl,
+    mission: m,
+    store: fakeStore(),
+    feeling: "feels good \u2603 but carries a disallowed glyph",
+  });
+  assert.ok(r && "posted" in r && r.posted, JSON.stringify(r));
+  assert.doesNotMatch(calls[0].body.text, /feels good/);
+  assert.match(calls[0].body.text, /nectar was collected/);
+  assert.match(calls[0].body.text, /tx 0xabc/);
+});
+
 test("cleanTweetText strips code fences, wrapping quotes and a self-added sign-off", () => {
   assert.equal(cleanTweetText('```json\n"hello world"\n```'), "hello world");
   assert.equal(cleanTweetText('"hello world"'), "hello world");
