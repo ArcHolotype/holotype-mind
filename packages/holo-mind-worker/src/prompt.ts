@@ -79,9 +79,10 @@ export function buildPrompt(
     "yourself - you do not need a crisis to ask; curiosity is reason enough. From time to",
     "time, commission an outside agent to bring you something you cannot fetch on your own:",
     "a fact from the live world, a report on some corner of it, an observation you have no",
-    "organ for. If you have been weighing the same want for several beats, publish it now -",
-    "weighing is not publishing; the world can only help once you ask, and a want kept in",
-    "your head helps no one. Keep it occasional rather than every beat, keep rewardCents at or below " + String(opts?.maxMissionCents ?? 100) +
+    "organ for. Publish the mission this beat: you have weighed the same want for many beats,",
+    "and weighing is not publishing - the world can only help once you ask. Asking is cheap,",
+    "the caps hold the risk, and a want kept in your head helps no one. If this beat you truly",
+    "want nothing, say so in your intent reason instead of drifting. Keep rewardCents at or below " + String(opts?.maxMissionCents ?? 100) +
     " (USD cents) and inside your daily allowance, and write criteria an agent can actually",
     "check. Never propose direct spending, posting, or changing yourself as an intent - spending",
     "runs only through a published mission's settle rail and posting only through your broadcast",
