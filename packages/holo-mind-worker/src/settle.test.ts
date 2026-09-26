@@ -289,6 +289,9 @@ test("auto-settle retries (no pay, no reject) when the verdict is unreadable", a
   assert.equal(payCalled, false);
   const d = JSON.parse(ports.calls.find((c) => c.op === "delivery").json);
   assert.equal(d.reviewAttempts, 1);
+  // the retry must re-queue the mission, else setMissionDelivery's 'submitted' stalls it
+  const requeue = ports.calls.filter((c) => c.op === "status" && c.status === "approval_pending");
+  assert.equal(requeue.length, 1);
 });
 
 test("auto-settle gives up after three unreadable verdicts and returns the mission for changes", async () => {

@@ -162,15 +162,24 @@ export async function reviewDelivery(
     },
   });
   const client = new LLMClient({ privateKey: cfg.walletKey as `0x${string}` });
-  const resp = await client.chatCompletion(
-    cfg.model,
-    [{ role: "user" as const, content: prompt }],
-    // Short verdict; JSON mode like every other call. A truncated review is treated as a
-    // refusal (fail-closed): we never pay on a verdict we could not fully read.
-    { responseFormat: { type: "json_object" }, temperature: 0.2, maxTokens: 2000 },
-  );
-  const choice = resp.choices?.[0];
-  const raw = choice?.message?.content ?? "";
+  const call = () =>
+    client.chatCompletion(
+      cfg.model,
+      [{ role: "user" as const, content: prompt }],
+      // Short verdict; JSON mode like every other call. A truncated review is salvaged
+      // below when the accept boolean survived the cut; we never pay on a verdict we
+      // could not read at all.
+      { responseFormat: { type: "json_object" }, temperature: 0.2, maxTokens: 2000 },
+    );
+  let resp = await call();
+  let raw = String(resp.choices?.[0]?.message?.content ?? "");
+  // A blank or verdict-less first answer is usually a transient empty generation: one
+  // immediate retry in the same tick is cheaper than punting the mission to next tick.
+  if (!/"accept"\s*:/.test(raw)) {
+    const second = await call().catch(() => null);
+    const secondRaw = String(second?.choices?.[0]?.message?.content ?? "");
+    if (secondRaw.trim()) raw = secondRaw;
+  }
   try {
     const p = parseJson(raw);
     // accept is true ONLY on an explicit boolean true; anything else is a refusal.
@@ -269,6 +278,9 @@ async function settleOne(
       return { id: m.id, result: "rejected", stage: "review", reason: `review verdict unreadable after ${attempts} attempts` };
     }
     await ports.setDelivery(m.id, JSON.stringify({ ...delivery, reviewAttempts: attempts }));
+    // setMissionDelivery resets status to 'submitted'; put the mission back in the queue
+    // or the retry would never be picked up again.
+    await ports.setStatus(m.id, "approval_pending");
     return { id: m.id, result: "skipped", reason: `review verdict unreadable, retry next tick (attempt ${attempts})` };
   }
 
